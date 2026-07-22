@@ -1,0 +1,58 @@
+[Unit]
+Description=Raw Data Layer — Multi-Asset Market Data Ingestion
+Documentation=https://github.com/yourusername/raw-data-layer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quant
+Group=quant
+WorkingDirectory=/opt/raw-data-layer
+
+# Binary
+ExecStart=/opt/raw-data-layer/raw-data-layer \
+    --mappings=/opt/raw-data-layer/mappings \
+    --wal-dir=/var/log/raw_data/wal \
+    --binance=true \
+    --ib=false \
+    --zmq=true \
+    --db=false \
+    --health-port=8080 \
+    --log-level=info
+
+# Restart policy — always restart with 5s delay
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+CPUQuota=80%
+
+# Environment — override via /etc/raw-data-layer/env
+EnvironmentFile=-/etc/raw-data-layer/env
+
+# Standard values (can be overridden by EnvironmentFile)
+Environment="BINANCE_ENDPOINT=wss://stream.binance.com:9443/ws"
+Environment="IB_HOST=localhost"
+Environment="IB_PORT=7497"
+Environment="DOLPHINDB_HOST=localhost"
+Environment="DOLPHINDB_PORT=8848"
+
+# Logging to journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=raw-data-layer
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/raw_data /opt/raw-data-layer/data
+
+[Install]
+WantedBy=multi-user.target

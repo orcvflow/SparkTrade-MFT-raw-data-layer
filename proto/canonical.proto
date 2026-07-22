@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package canonical;
+
+option go_package = "github.com/yourusername/raw-data-layer/proto/gen;gen";
+
+// CanonicalEvent represents a normalized market data event
+// Supports multi-asset: Forex, Futures, Crypto, Equities
+message CanonicalEvent {
+  string event_id = 1;              // UUID v4
+  string source = 2;                // "BINANCE" | "IB" | "NASDAQ" | "CTP" | "CME"
+  string canonical_symbol = 3;      // "BTC/USD", "AAPL", "ES-202503"
+  int64 exchange_timestamp = 4;     // Exchange time (nanoseconds since epoch)
+  int64 local_hw_timestamp = 5;     // Local hardware timestamp (PTP)
+  EventType event_type = 6;
+  double price = 7;
+  double size = 8;
+  string side = 9;                  // "BUY" | "SELL" | "UNKNOWN"
+  repeated Level levels = 10;       // For order book
+  bytes raw_payload = 11;           // Original message (lossless)
+  string raw_format = 12;           // "JSON" | "BINARY" | "FIX"
+  
+  // Asset-specific metadata
+  ForexMetadata forex = 13;
+  FuturesMetadata futures = 14;
+  CryptoMetadata crypto = 15;
+  EquityMetadata equity = 16;
+}
+
+// EventType defines the type of market data event
+enum EventType {
+  UNKNOWN = 0;
+  TRADE = 1;
+  QUOTE = 2;
+  BOOK_UPDATE = 3;
+  BOOK_SNAPSHOT = 4;
+}
+
+// Level represents a single order book level
+message Level {
+  double price = 1;
+  double size = 2;
+  string side = 3;
+  int64 order_id = 4;
+}
+
+// ForexMetadata contains Forex-specific fields
+message ForexMetadata {
+  string currency_pair = 1;
+  double bid = 2;
+  double ask = 3;
+  double spread = 4;
+}
+
+// FuturesMetadata contains Futures-specific fields
+message FuturesMetadata {
+  string contract_month = 1;
+  double open_interest = 2;
+  double settlement_price = 3;
+}
+
+// CryptoMetadata contains Crypto-specific fields
+message CryptoMetadata {
+  string exchange_specific = 1;  // JSON blob for exchange-specific data
+}
+
+// EquityMetadata contains Equity-specific fields
+message EquityMetadata {
+  string exchange = 1;
+  string mic = 2;                    // Market Identifier Code
+  repeated string condition_codes = 3;
+}

@@ -1,0 +1,127 @@
+# Raw Data Layer — Test/Demo Configuration
+# Default values for testing without production credentials
+
+adapters:
+  binance:
+    enabled: true
+    endpoint: "wss://testnet.binance.vision/ws"  # Testnet (no real money)
+    symbols:
+      - "btcusdt"
+      - "ethusdt"
+      - "bnbusdt"
+      - "adausdt"
+      - "solusdt"
+    reconnect:
+      max_attempts: 10
+      backoff_seconds: [1, 2, 4, 8, 16, 30]  # Exponential backoff
+    heartbeat_interval: "30s"
+    session_rotation: "24h"  # Proactive reconnect before 24h limit
+    
+  ib:
+    enabled: true
+    host: "localhost"
+    port: 7497  # 7496 = Live, 7497 = Paper trading
+    client_id: 1
+    symbols:
+      - "AAPL"
+      - "MSFT"
+      - "GOOGL"
+      - "TSLA"
+      - "AMZN"
+    reconnect:
+      max_attempts: 10
+      backoff_seconds: [1, 2, 4, 8, 16, 30]
+    request_timeout: "10s"
+
+worker_pool:
+  workers: 50  # Optimal for 4-core CPU (DataSea.cn benchmark)
+  queue_size: 10000  # Burst traffic buffer
+  autoscale:
+    enabled: true
+    high_water_mark: 0.8  # 80% - scale up
+    low_water_mark: 0.2   # 20% - scale down
+    max_workers: 100
+    min_workers: 25
+
+publisher:
+  zeromq:
+    enabled: true
+    protocol: "tcp"
+    bind_address: "*"
+    port: 5555
+    heartbeat_interval: "5s"
+    hwm: 10000  # High water mark (messages)
+
+storage:
+  wal:
+    enabled: true
+    directory: "./data/wal"
+    rotation_size: 104857600  # 100MB
+    rotation_count: 10000      # messages
+    sync_interval: "1s"
+    
+  dolphindb:
+    enabled: false  # Disabled for MVP - use WAL only
+    host: "localhost"
+    port: 8848
+    username: "admin"
+    password: "123456"
+    database: "raw_data"
+    batch_size: 1000
+    batch_timeout: "1s"
+    connection_pool:
+      max_open: 10
+      max_idle: 5
+      max_lifetime: "1h"
+
+validation:
+  enabled: true
+  layers:
+    connectivity: true    # Layer 1: Connection health
+    protocol: true        # Layer 2: Message format
+    data_integrity: true  # Layer 3: Symbol mapping, precision
+    fault_tolerance: true # Layer 4: Backpressure, timeout
+    performance: true     # Layer 5: Latency tracking
+
+health:
+  http_port: 8080
+  metrics_port: 9090
+  readiness_path: "/ready"
+  liveness_path: "/live"
+
+logging:
+  level: "debug"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, file
+  file:
+    path: "./logs/raw-data-layer.log"
+    max_size: 100  # MB
+    max_backups: 3
+    max_age: 7  # days
+
+# Axle-Axiom mathematical engine configuration
+axiom:
+  sanitization:
+    enabled: true
+    overflow_threshold: 1e15  # Detect values > 1e15
+    price_clamp:
+      enabled: false
+      min: 0.0001
+      max: 1e9
+  
+  statistics:
+    moving_average_window: 100
+    percentile_tracker_size: 1000
+    stddev_window: 100
+  
+  performance:
+    batch_sanitize: true
+    parallel_workers: 8  # For ParallelSanitize
+
+# Performance targets (for monitoring)
+performance:
+  adapter_latency_p50_us: 500   # < 500μs
+  adapter_latency_p99_us: 5000  # < 5ms
+  throughput_msg_per_sec: 100000  # > 100K msg/s
+  queue_depth_warning: 8000     # Alert if > 8000
+  memory_limit_mb: 2000         # Alert if > 2GB

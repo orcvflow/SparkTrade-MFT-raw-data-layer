@@ -1,0 +1,15 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    service: raw-data-layer
+
+scrape_configs:
+  - job_name: raw-data-layer
+    static_configs:
+      - targets: ['raw-data-layer:8080']
+    metrics_path: /metrics
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

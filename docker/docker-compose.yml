@@ -1,0 +1,124 @@
+version: '3.8'
+
+# Raw Data Layer — Docker Compose
+# Services: raw-data-layer + Prometheus + Grafana
+# DolphinDB is external (connect via environment variables)
+#
+# Usage:
+#   docker-compose up -d
+#   docker-compose logs -f raw-data-layer
+#   docker-compose down
+
+networks:
+  rdl-net:
+    driver: bridge
+
+volumes:
+  wal-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+
+  # ── Raw Data Layer ────────────────────────────────────────────────────────
+  raw-data-layer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raw-data-layer
+    restart: unless-stopped
+
+    environment:
+      # DolphinDB (optional — leave disabled for WAL-only mode)
+      DOLPHINDB_HOST:   ${DOLPHINDB_HOST:-localhost}
+      DOLPHINDB_PORT:   ${DOLPHINDB_PORT:-8848}
+
+      # IB Gateway (set to your TWS/Gateway host)
+      IB_HOST:          ${IB_HOST:-localhost}
+      IB_PORT:          ${IB_PORT:-7497}
+
+      # Binance — testnet by default
+      BINANCE_ENDPOINT: ${BINANCE_ENDPOINT:-wss://testnet.binance.vision/ws}
+
+    command:
+      - "--mappings=/app/mappings"
+      - "--wal-dir=/var/log/raw_data/wal"
+      - "--binance=true"
+      - "--ib=false"
+      - "--zmq=true"
+      - "--db=false"
+      - "--health-port=8080"
+      - "--log-level=info"
+
+    ports:
+      - "5555:5555"   # ZeroMQ PUB socket
+      - "8080:8080"   # Health check HTTP
+
+    volumes:
+      - wal-data:/var/log/raw_data/wal
+      - ../mappings:/app/mappings:ro
+      - ../config:/app/config:ro
+
+    networks:
+      - rdl-net
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Prometheus ────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: rdl-prometheus
+    restart: unless-stopped
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+
+    ports:
+      - "9090:9090"
+
+    volumes:
+      - ../deployments/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+    networks:
+      - rdl-net
+
+    depends_on:
+      - raw-data-layer
+
+  # ── Grafana ───────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: rdl-grafana
+    restart: unless-stopped
+
+    environment:
+      GF_SECURITY_ADMIN_USER:     ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-rawdata123}
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+
+    ports:
+      - "3000:3000"
+
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+    networks:
+      - rdl-net
+
+    depends_on:
+      - prometheus
