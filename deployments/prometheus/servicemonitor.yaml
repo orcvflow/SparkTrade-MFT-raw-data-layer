@@ -1,0 +1,26 @@
+# ServiceMonitor for the Prometheus Operator (monitoring.coreos.com CRD).
+# Label-based discovery: the operator scrapes Services matching the selector.
+# Requires the prometheus-operator (kube-prometheus-stack) installed in-cluster;
+# the operator must be configured to select ServiceMonsters (typically via a
+# `prometheus: kube-prometheus` label — adjust .metadata.labels.release below
+# to match your operator's serviceMonitorSelector).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: raw-data-layer
+  namespace: raw-data-layer
+  labels:
+    app.kubernetes.io/name: raw-data-layer
+    release: prometheus   # common convention; match your operator's selector
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: raw-data-layer   # matches deployments/k8s/service.yaml
+  namespaceSelector:
+    matchNames:
+      - raw-data-layer
+  endpoints:
+    - {port: adapter-metrics,       path: /metrics, interval: 15s}
+    - {port: canonicalizer-metrics, path: /metrics, interval: 15s}
+    - {port: publisher-metrics,     path: /metrics, interval: 15s}
+    - {port: storage-metrics,       path: /metrics, interval: 15s}

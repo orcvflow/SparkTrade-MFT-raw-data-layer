@@ -1,0 +1,18 @@
+# Durable WAL volume — data must survive pod restart (CLAUDE.md: "Never lose data").
+# RWO because the pipeline runs as a single sidecar pod (one writer).
+# Switch to RWX + a shared filesystem (NFS/CephFS) ONLY if you move to 4 separate
+# Deployments — and even then, UDS sockets should NOT live on a network FS.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: raw-data-wal
+  namespace: raw-data-layer
+  labels:
+    app.kubernetes.io/name: raw-data-layer
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi          # WAL rotation: 100 MiB × rotation_count; tune per retention
+  storageClassName: ""        # empty = bind default StorageClass; set to your SC if needed

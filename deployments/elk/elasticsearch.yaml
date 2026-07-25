@@ -1,0 +1,48 @@
+# Elasticsearch — single-node (MVP). PRODUCTION: run a 3-node cluster with
+# xpack.security.enabled=true + auth + TLS + persistent volume + ILM.
+# Single-node + security disabled here is for local/dev validation only.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  namespace: raw-data-layer
+  labels:
+    app.kubernetes.io/name: elasticsearch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch
+    spec:
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+          env:
+            - {name: discovery.type, value: single-node}
+            - {name: xpack.security.enabled, value: "false"}
+            - {name: ES_JAVA_OPTS, value: "-Xms512m -Xmx512m"}
+          ports:
+            - {name: http, containerPort: 9200}
+          resources:
+            requests: {cpu: "500m", memory: "1Gi"}
+            limits: {cpu: "1000m", memory: "2Gi"}
+          # A persistent volume is omitted for the MVP manifest; add a PVC
+          # (like raw-data-wal) for production so indices survive restart.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: raw-data-layer
+  labels:
+    app.kubernetes.io/name: elasticsearch
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: elasticsearch
+  ports:
+    - {name: http, port: 9200, targetPort: http}

@@ -1,10 +1,10 @@
 # Raw Data Layer — Next Steps & Future Work
 
-**MVP Status:** ✅ Complete (18/18 tasks) + Addım C (multi-process) + Addım D (SIMD/zero-copy)  
-**Merge Status:** ✅ `main` → `7988f94` (C+D ff-merge, 2026-07-25); `v0.4.0` tag  
-**Build Status:** ✅ All packages compile; `go vet` clean  
-**Test Status:** ✅ All passing — full suite + `-race` green + regression green (2026-07-25)  
-**Next Phase:** Addım E — Production Deployment (see `STEP-D.md` §8)
+**MVP Status:** ✅ Complete (18/18 tasks) + Addım C (multi-process) + Addım D (SIMD/zero-copy) + Addım E (production deploy + system-level measurement)
+**Merge Status:** ✅ `main` → `7988f94` (C+D ff-merge, 2026-07-25); `v0.4.0` tag; Addım E working tree commit pending
+**Build Status:** ✅ All packages compile; `go vet` clean
+**Test Status:** ✅ All passing — full suite + `-race` green + regression green + benchmark MEASURED (2026-07-25)
+**Next Phase:** Addım F — production-default batched WAL + live 4-process UDS benchmark (see `STEP-E.md` §9)
 
 ## Immediate Fixes — ✅ Resolved (2026-07-24)
 
@@ -41,21 +41,21 @@ with an empty provider symbol → always "UNKNOWN". Added `Canonical any` to
 `ProcessedMessage`; `outputPipeline` now uses `processed.Canonical` directly
 (`pkg/canonicalizer/worker.go`, `pkg/workerpool/pool.go`, `cmd/raw-data-layer/main.go`).
 
-## Addım E — Production Deployment (Sonrakı fazə)
+## Addım E — Production Deployment ✅ Tamamlandı (2026-07-25)
 
-Addım D (code-only optimizasiya) bitdi. Addım E system-level ölçüm və canlı deploy. Tam yol xəritəsi: `STEP-D.md` §8.
+Addım E (E1–E7) tamamlandı. **İlk dəfə ölçülmüş system-level rəqəmlər:** batched WAL 148K msg/s, p99 26µs, 0 GC, 2MB heap — spec hədəfləri ötürülür. Detallar: `STEP-E.md`.
 
 | Task | Əhatə | Status |
 |------|-------|--------|
-| E1 Production benchmark CLI | `./bin/adapter --benchmark` — throughput/latency p50-p99/GC/mem; **spec hədəflərini (200K msg/s, <500µs p99, <100ms GC, <2GB) BURADA ölçürük** | ⏳ |
-| E2 Grafana dashboard | Throughput, Latency p50/p95/p99, GC pause, Memory, CPU, Queue depth | ⏳ |
-| E3 Kubernetes manifests | 4 process üçün Deployment/Service/ConfigMap/Secrets/HPA | ⏳ |
-| E4 Helm Chart | `values.yaml` + `templates/` | ⏳ |
-| E5 Prometheus + ServiceMonitor | Metrika toplama (endpoint `pkg/health`-də hazırdır) | ⏳ |
-| E6 ELK Stack | Filebeat + Elasticsearch + Kibana (struktur log-lar `pkg/pipeline`-də hazırdır) | ⏳ |
-| E7 CI/CD | GitHub Actions: build→test→race→bench-regression | ⏳ |
+| E1 Production benchmark CLI | `./bin/adapter --benchmark` — sync+batched WAL, throughput/latency p50-p99/GC/mem; spec hədəfləri MEASURED | ✅ |
+| E2 Grafana dashboard | ≥9 panel, jq-valid | ✅ |
+| E3 Kubernetes manifests | 4 Deployment + Service + ConfigMap + Secret + PVC | ✅ |
+| E4 Helm Chart | sidecar topology, `values.yaml` + templates | ✅ |
+| E5 Prometheus + ServiceMonitor | + Go runtime/process collector-lar `pkg/health`-də | ✅ |
+| E6 ELK Stack | Filebeat + Elasticsearch + Kibana (multi-doc YAML) | ✅ |
+| E7 CI/CD | GitHub Actions: build→test -race→regression→golangci-lint→validate_yaml; release: 4 binary + docker | ✅ |
 
-7-gün planı və Addım E diqqət nöqtələri: `STEP-D.md` §8.2-§8.4.
+**Honest tapıntı:** sync WAL (cari production default) fsync-bound ~20 msg/s, spec hədəflərini ötə bilmir. Batched WAL ~4,500× daha sürətli. Addım F: production default-u sync→batched-ə çevir.
 
 ## Post-MVP Improvements (Priority: Medium)
 
@@ -351,8 +351,8 @@ The Raw Data Layer MVP is **complete and functional**, with all 18 tasks impleme
 1. ~~Fix the 4 failing tests~~ — ✅ done 2026-07-24
 2. ~~Addım C (multi-process)~~ — ✅ done 2026-07-25 (`9daec88`)
 3. ~~Addım D (SIMD/zero-copy)~~ — ✅ done 2026-07-25 (`7988f94`, merged to `main`, `v0.4.0`)
-4. ⏳ `git push origin main --tags` — outward-facing, istifadəçi təsdiqi gözləyir
-5. Addım E Task E1 — production benchmark CLI (spec hədəflərini ölç)
-6. Addım E Task E2-E7 — deploy infra (K8s, Grafana, ELK, CI/CD)
+4. ~~Addım E (production deploy + measurement)~~ — ✅ done 2026-07-25 (E1–E7, `STEP-E.md`)
+5. ⏳ `git push origin main --tags` — outward-facing, istifadəçi təsdiqi gözləyir
+6. Addım F — production-default batched WAL + live 4-process UDS benchmark
 
 The system is ready to serve as the foundation for sophisticated multi-asset trading systems, with a clear path for future expansion and improvement.

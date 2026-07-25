@@ -1,0 +1,20 @@
+# Service exposing the sidecar pod's ports.
+#   5555  — ZeroMQ PUB (strategies subscribe here)
+#   8081-8084 — /metrics + /live + /ready per process (Prometheus scrape + ops)
+apiVersion: v1
+kind: Service
+metadata:
+  name: raw-data-layer
+  namespace: raw-data-layer
+  labels:
+    app.kubernetes.io/name: raw-data-layer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: raw-data-layer
+  ports:
+    - {name: zmq,                  port: 5555, targetPort: zmq}
+    - {name: adapter-metrics,      port: 8081, targetPort: adapter-health}
+    - {name: canonicalizer-metrics,port: 8082, targetPort: canonicalizer-health}
+    - {name: publisher-metrics,    port: 8083, targetPort: publisher-health}
+    - {name: storage-metrics,      port: 8084, targetPort: storage-health}

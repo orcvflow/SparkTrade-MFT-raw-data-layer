@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']   # build + attach to GitHub Release on any v* tag
+
+permissions:
+  contents: write  # needed to create the GitHub Release + upload assets
+
+jobs:
+  release:
+    name: Build binaries + docker image + GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # CGO_ENABLED=1: pebbe/zmq4 (ZeroMQ) is cgo. Native linux/amd64 on the
+      # ubuntu runner builds fine with gcc. For cross-arch, install the
+      # matching cross-gcc and set CC.
+      - name: Build 4 process binaries + monolith
+        run: |
+          mkdir -p dist
+          for bin in adapter canonicalizer publisher storage raw-data-layer; do
+            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+              go build -ldflags="-s -w" -o "dist/$bin" "./cmd/$bin"
+            (cd dist && tar -czf "${bin}-linux-amd64.tar.gz" "$bin")
+          done
+          ls -la dist/
+
+      - name: Build docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: raw-data-layer:${{ github.ref_name }}
+          outputs: type=docker,dest=/tmp/raw-data-layer-${{ github.ref_name }}.tar
+
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*-linux-amd64.tar.gz
+            /tmp/raw-data-layer-${{ github.ref_name }}.tar
+          generate_release_notes: true

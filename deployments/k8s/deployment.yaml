@@ -1,0 +1,189 @@
+# Raw Data Layer — single Pod, 4 sidecar containers.
+#
+# DESIGN: K8s pods cannot share a filesystem across pods, but the pipeline's
+# inter-process IPC is UDS (Unix Domain Sockets) at /run/rdl/*.sock (see
+# config.multi.yaml `ipc`). UDS requires a shared filesystem, so the 4
+# pipeline processes must co-locate in ONE pod sharing an emptyDir at /run/rdl.
+# Splitting into 4 separate Deployments would require switching pkg/ipc from
+# UDS to TCP (a code change, and it would add network latency that negates
+# Addım D's zero-copy low-latency work). See README.md for the trade-off.
+#
+# Startup ordering: K8s does not guarantee container start order within a pod.
+# This is fine because each process connects to the upstream UDS socket with
+# exponential backoff reconnect (1,2,4,8,16,30s — CLAUDE.md paranoid principle:
+# "Always recoverable"). The pipeline self-heals regardless of start order.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raw-data-layer
+  namespace: raw-data-layer
+  labels:
+    app.kubernetes.io/name: raw-data-layer
+    app.kubernetes.io/component: pipeline
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # RWO PVC (raw-data-wal); do not co-locate two pods on it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: raw-data-layer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: raw-data-layer
+    spec:
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: rdl-sock
+          emptyDir: {}                       # UDS socket dir — shared across the 4 containers
+        - name: rdl-wal
+          persistentVolumeClaim:
+            claimName: raw-data-wal          # durable WAL — survives pod restart (never lose data)
+        - name: config
+          configMap:
+            name: raw-data-layer-config       # mounts config.multi.yaml at /app/config
+        - name: mappings
+          configMap:
+            name: raw-data-layer-mappings     # optional — mapper falls back to UNKNOWN if absent
+            optional: true
+      containers:
+        # ---------- storage (pipeline root; binds publisher_to_storage.sock) ----------
+        - name: storage
+          image: raw-data-layer:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/app/storage", "-config", "/app/config/config.multi.yaml"]
+          ports:
+            - {name: storage-health, containerPort: 8084}
+          env:
+            - {name: WAL_DIR, value: /var/log/raw_data/wal}
+            - {name: MAPPINGS_DIR, value: /app/mappings}
+            - {name: STORAGE_HEALTH_PORT, value: "8084"}
+            - {name: LOG_LEVEL, value: info}
+            - name: DOLPHINDB_HOST
+              valueFrom:
+                secretKeyRef: {name: raw-data-layer-secret, key: dolphindb-host, optional: true}
+            - name: DOLPHINDB_PORT
+              valueFrom:
+                secretKeyRef: {name: raw-data-layer-secret, key: dolphindb-port, optional: true}
+            - name: DOLPHINDB_USER
+              valueFrom:
+                secretKeyRef: {name: raw-data-layer-secret, key: dolphindb-user, optional: true}
+            - name: DOLPHINDB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: raw-data-layer-secret, key: dolphindb-password, optional: true}
+          volumeMounts:
+            - {name: rdl-sock, mountPath: /run/rdl}
+            - {name: rdl-wal, mountPath: /var/log/raw_data/wal}
+            - {name: config, mountPath: /app/config, readOnly: true}
+            - {name: mappings, mountPath: /app/mappings, readOnly: true}
+          livenessProbe:
+            httpGet: {path: /live, port: storage-health}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: {path: /ready, port: storage-health}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "250m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+        # ---------- publisher (binds canonicalizer_to_publisher.sock; PUB on 5555) ----------
+        - name: publisher
+          image: raw-data-layer:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/app/publisher", "-config", "/app/config/config.multi.yaml"]
+          ports:
+            - {name: publisher-health, containerPort: 8083}
+            - {name: zmq, containerPort: 5555}
+          env:
+            - {name: ZMQ_PORT, value: "5555"}
+            - {name: PUBLISHER_HEALTH_PORT, value: "8083"}
+            - {name: LOG_LEVEL, value: info}
+          volumeMounts:
+            - {name: rdl-sock, mountPath: /run/rdl}
+            - {name: config, mountPath: /app/config, ReadOnly: true}
+            - {name: mappings, mountPath: /app/mappings, ReadOnly: true}
+          livenessProbe:
+            httpGet: {path: /live, port: publisher-health}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: {path: /ready, port: publisher-health}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "250m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+        # ---------- canonicalizer (binds adapter_to_canonicalizer.sock) ----------
+        - name: canonicalizer
+          image: raw-data-layer:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/app/canonicalizer", "-config", "/app/config/config.multi.yaml"]
+          ports:
+            - {name: canonicalizer-health, containerPort: 8082}
+          env:
+            - {name: MAPPINGS_DIR, value: /app/mappings}
+            - {name: WAL_DIR, value: /var/log/raw_data/wal}
+            - {name: CANONICALIZER_HEALTH_PORT, value: "8082"}
+            - {name: LOG_LEVEL, value: info}
+          volumeMounts:
+            - {name: rdl-sock, mountPath: /run/rdl}
+            - {name: rdl-wal, mountPath: /var/log/raw_data/wal}
+            - {name: config, mountPath: /app/config, ReadOnly: true}
+            - {name: mappings, mountPath: /app/mappings, ReadOnly: true}
+          livenessProbe:
+            httpGet: {path: /live, port: canonicalizer-health}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: {path: /ready, port: canonicalizer-health}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "250m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+        # ---------- adapter (connects to adapter_to_canonicalizer.sock) ----------
+        - name: adapter
+          image: raw-data-layer:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/app/adapter", "-config", "/app/config/config.multi.yaml"]
+          ports:
+            - {name: adapter-health, containerPort: 8081}
+          env:
+            - {name: MAPPINGS_DIR, value: /app/mappings}
+            - {name: ADAPTER_HEALTH_PORT, value: "8081"}
+            - {name: WAL_DIR, value: /var/log/raw_data/wal}
+            - {name: LOG_LEVEL, value: info}
+            - name: BINANCE_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: raw-data-layer-secret, key: binance-endpoint, optional: true}
+            - name: IB_HOST
+              valueFrom:
+                secretKeyRef: {name: raw-data-layer-secret, key: ib-host, optional: true}
+            - name: IB_PORT
+              valueFrom:
+                secretKeyRef: {name: raw-data-layer-secret, key: ib-port, optional: true}
+          volumeMounts:
+            - {name: rdl-sock, mountPath: /run/rdl}
+            - {name: rdl-wal, mountPath: /var/log/raw_data/wal}
+            - {name: config, mountPath: /app/config, ReadOnly: true}
+            - {name: mappings, mountPath: /app/mappings, ReadOnly: true}
+          livenessProbe:
+            httpGet: {path: /live, port: adapter-health}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: {path: /ready, port: adapter-health}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "250m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}

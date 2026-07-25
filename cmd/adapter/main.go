@@ -12,12 +12,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
 	"raw-data-layer/pkg/adapter"
+	"raw-data-layer/pkg/benchmark"
 	"raw-data-layer/pkg/config"
 	"raw-data-layer/pkg/health"
 	"raw-data-layer/pkg/ipc"
@@ -33,9 +35,21 @@ func main() {
 	}()
 
 	cfgPath := flag.String("config", "config/config.yaml", "config file path")
+	benchMode := flag.Bool("benchmark", false, "run in-process benchmark mode (no adapters, no IPC); emits JSON report to stdout and exits")
+	benchMessages := flag.Int("messages", 1000000, "benchmark: messages to measure (after warmup)")
+	benchWarmup := flag.Int("warmup", 10000, "benchmark: warmup messages (discarded)")
 	flag.Parse()
 
 	cfg, _ := config.Load(*cfgPath)
+	// --benchmark: in-process pipeline measurement (Addım E, Task E1). Branches
+	// BEFORE any IPC client / adapter / health server is created, so the normal
+	// multi-process adapter run path is completely untouched. The benchmark is
+	// self-contained (stub mapper + temp WAL dir; no Binance testnet, no live
+	// DolphinDB) and CI-reproducible.
+	if *benchMode {
+		runBenchmark(*benchMessages, *benchWarmup)
+		return
+	}
 	log := pipeline.NewLogger(cfg.Logging)
 	log.Info("adapter process starting", "port", cfg.Processes.AdapterHealthPort)
 
@@ -181,4 +195,28 @@ type logger interface {
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 	Debug(msg string, args ...any)
+}
+
+// runBenchmark executes the Addım E E1 in-process pipeline benchmark (sync WAL
+// + batched WAL) and emits the JSON report to stdout. Exits non-zero on error.
+// Never panics (the benchmark package itself is defer/recover-instrumented);
+// this wrapper only handles the error/encode path.
+func runBenchmark(messages, warmup int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: benchmark panic: %v\n", r)
+			os.Exit(1)
+		}
+	}()
+	out, err := benchmark.RunBoth(messages, warmup)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "benchmark failed: %v\n", err)
+		os.Exit(1)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		fmt.Fprintf(os.Stderr, "encode failed: %v\n", err)
+		os.Exit(1)
+	}
 }

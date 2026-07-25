@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # manual trigger for the optional live-network job
+
+# CI MUST NOT fail on the absence of live Binance/DolphinDB. Anything that
+# touches an external service lives in the `network` job, gated to
+# workflow_dispatch + continue-on-error. The main `test` job is hermetic.
+jobs:
+  test:
+    name: build + test + race + regression + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build all
+        run: go build ./...
+
+      # Full unit + integration + chaos suite under the race detector.
+      - name: Test (-race)
+        run: go test ./... -race -timeout 300s
+
+      # Regression (performance invariants) runs WITHOUT -race: the race
+      # detector instruments every memory access and corrupts the Sonic JIT
+      # + mmap byte-byte access 20-30x (see test/regression/regression_test.go
+      # header). Race-safety is covered by the main -race suite above
+      # (pkg/orderbook concurrent test).
+      - name: Regression (perf, no -race)
+        run: go test -tags=regression ./test/regression/... -timeout 300s
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62
+          args: --timeout 5m
+
+  network:
+    name: live-network (optional, manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # These need real secrets (BINANCE_ENDPOINT, DOLPHINDB_*). They NEVER
+      # gate the main CI: continue-on-error + only run on manual dispatch.
+      - name: Binance integration (testnet)
+        env:
+          BINANCE_ENDPOINT: ${{ secrets.BINANCE_ENDPOINT }}
+        run: go test -tags=integration ./test/integration/... -run Binance -timeout 120s
+        continue-on-error: true
+      - name: DolphinDB integration
+        env:
+          DOLPHINDB_HOST: ${{ secrets.DOLPHINDB_HOST }}
+          DOLPHINDB_PORT: ${{ secrets.DOLPHINDB_PORT }}
+          DOLPHINDB_USER: ${{ secrets.DOLPHINDB_USER }}
+          DOLPHINDB_PASSWORD: ${{ secrets.DOLPHINDB_PASSWORD }}
+        run: go test -tags=integration ./test/integration/... -run DolphinDB -timeout 120s
+        continue-on-error: true

@@ -1,0 +1,33 @@
+# golangci-lint configuration — conservative linter set chosen to catch real
+# bugs without flagging pre-existing intentional patterns (e.g. _ = fn() for
+# explicitly-ignored errors, which errcheck accepts).
+run:
+  timeout: 5m
+  go: "1.25"
+
+linters:
+  disable-all: true
+  enable:
+    - govet          # standard go vet
+    - errcheck       # unchecked errors (accepts explicit _ =)
+    - ineffassign    # ineffectual assignments
+    - misspell       # spelling in comments/strings
+    - gofmt          # formatting
+    - goimports      # import ordering + grouping
+    - revive         # common stylistic checks (replaces the old golint)
+
+linters-settings:
+  errcheck:
+    check-blank: false     # allow `_ =` (explicit ignore) — pipeline uses this for Stop/Close
+    check-type-assertions: false
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # canonicalizer keeps the map-extraction helpers (extractString/Int64) for
+    # backward-compat with older tests (see worker.go comment). They are
+    # intentionally present.
+    - path: pkg/canonicalizer/worker\.go
+      linters: [revive]
+      text: "exported|unused|extract"

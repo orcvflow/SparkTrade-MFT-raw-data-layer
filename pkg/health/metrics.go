@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -107,6 +108,18 @@ func Register() {
 		DolphinDBWrites,
 		DolphinDBWriteErrors,
 	)
+	// Go runtime + process collectors: expose go_gc_duration_seconds,
+	// go_memstats_alloc_bytes, go_goroutines, process_cpu_seconds_total,
+	// process_resident_memory_bytes, etc. These back the Grafana GC/heap/
+	// goroutines panels (Addım E E2). Registered via Register (not
+	// MustRegister) so a pre-existing default registration is a no-op rather
+	// than a panic — CLAUDE.md: never panic.
+	for _, c := range []prometheus.Collector{
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	} {
+		_ = prometheus.DefaultRegisterer.Register(c)
+	}
 	registered = true
 }
 

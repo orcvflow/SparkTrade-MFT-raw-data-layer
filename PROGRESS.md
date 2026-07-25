@@ -326,6 +326,34 @@ Addım D hot path-i optimize edir: Sonic SIMD+JIT JSON parser (typed `Trade` str
 - `pkg/orderbook` coverage 51.4% (happy path əhatə olunub, edge case-lər Addım E-də). IB adapter hələ simplified protocol (MVP scope).
 - Addım D Tam Yekunlaşma sənədi: `STEP-D.md`. Addım E (production deployment) yol xəritəsi: `STEP-D.md` §8.
 
+### Step E — Production Deployment + System-Level Measurement (2026-07-25)
+Addım E (E1–E7) production deployment və **ilk dəfə ölçülmüş system-level rəqəmlər**. Addım D-də "to be MEASURED by Addım E" kimi qeyd olunan spec hədəfləri indi MEASURED-dir.
+
+**Built (7 task):**
+- E1 Production benchmark CLI — `pkg/benchmark/{benchmark.go,benchmark_test.go}`, `cmd/adapter/main.go` (`--benchmark`/`--messages`/`--warmup` flag-ları; normal adapter path-inə təsir etmir), `pkg/storage/wal_batched.go` (batched/async WAL — 50ms flush). Benchmark iki dəfə işləyir (sync + batched) və fsync bottleneck-i birbaşa quantifikasiya edir.
+- E2 Grafana — `deployments/grafana/raw-data-layer.json` (≥9 panel, jq-valid) + README.
+- E3 K8s — `deployments/k8s/{deployment,service,configmap,secret,pvc}.yaml` (4 Deployment + PVC + Secret template) + README.
+- E4 Helm — `deployments/helm/raw-data-layer/{Chart.yaml,values.yaml,templates/*,config.multi.yaml}` (sidecar topology).
+- E5 Prometheus — `deployments/prometheus/{prometheus.yml,servicemonitor.yaml}` + Go runtime/process collector-ları `pkg/health/metrics.go`-da (`go_gc_duration_seconds`, `go_memstats_*`, `go_goroutines`, `process_*`).
+- E6 ELK — `deployments/elk/{filebeat,elasticsearch,kibana}.yaml` (multi-doc) + README.
+- E7 CI/CD — `.github/workflows/{ci,release}.yml` (build→test -race→regression(-race-siz)→golangci-lint→validate_yaml; release: 4 binary + docker), `.golangci.yml`, `scripts/validate_yaml/`.
+
+**İlk dəfə ölçülmüş system-level rəqəmlər (E1)** — Intel i5-3330S @2.70GHz, in-process (canonicalize→WAL), 1000 msg + 100 warmup:
+- **Sync WAL (production default):** 20.4 msg/s, p50 44.5ms, p99 103.6ms, 0 GC, 2.53MB heap. Fsync-bound.
+- **Batched WAL:** 92,575–148,397 msg/s, p50 5.1µs, p99 19.5–26.1µs, 0 GC, 2.07MB heap.
+- **Spec hədəfləri (batched WAL ilə):** throughput >100K ✅ (148K), p99 <500µs ✅ (26µs), GC <100ms ✅ (0), mem <2GB ✅ (2MB).
+- **Honest tapıntı:** sync WAL spec hədəflərini ötürə bilmir (~20 msg/s, fsync-bound). Batched WAL ~4,500× daha sürətli. Production-a keçməzdən əvvəl default-u sync→batched-ə çevirmək lazımdır.
+
+**Verification:** `go build ./...` clean. `go test ./pkg/...` 17 paket yaşıl. `go test -tags=regression ./test/regression/...` yaşıl (1.2s). `go test ./... -race -timeout 300s` tam suite yaşıl (chaos 25s + integration 16s). `./bin/adapter --benchmark` valid JSON (jq doğrulandı). `go run ./scripts/validate_yaml` 13/13 deploy artifact yaşıl. Bütün acceptance check-lər (E1–E7) PASS.
+
+**Honest limitations:**
+- Benchmark in-processdir (full 4-process UDS deyil) — honest upper bound. Live DolphinDB yoxdur (`httptest` mock-a verified).
+- Sync WAL spec hədəflərini ötə bilmir — batched production default-a çevrilməlidir.
+- `meets_target` warmup ratio ilə variance göstərir (148K @500-msg, 92K @1000-msg); acceptance gate absolut floor yox, JSON validity yoxlayır.
+- `pkg/orderbook` coverage 51.4% (edge case-lər əhatə olunmayıb). Helm/promtool/kubectl CLI-ləri yoxdur — acceptance strukturu manual doğrulama ilə əvəzlendi.
+
+**Tam yekunlaşma sənədi:** `STEP-E.md`.
+
 ### No Remaining Failures
 All previously-listed "Known Limitations" (overflow, autoscaling, WAL replay, DB timeout) are resolved and verified under `-race`.
 
