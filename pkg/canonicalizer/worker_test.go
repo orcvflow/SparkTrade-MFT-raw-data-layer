@@ -509,3 +509,31 @@ func BenchmarkCanonicalizer_Process(b *testing.B) {
 		c.Process(ctx, raw)
 	}
 }
+
+// BenchmarkCanonicalizer_Process_Pooled measures the REAL production lifecycle
+// (Addım D): Acquire → Process → Release. Releasing the event back to the pool
+// after each call is what the canonicalizer process does (cmd/canonicalizer
+// releases after EncodeCanonical copies the bytes out). Compare allocs/op
+// against BenchmarkCanonicalizer_Process above (which does not release) to see
+// the sync.Pool allocation reduction directly.
+func BenchmarkCanonicalizer_Process_Pooled(b *testing.B) {
+	m, _ := mapper.NewSymbolMapper("../../mappings")
+	c := NewCanonicalizer(m)
+	ctx := context.Background()
+
+	payload := []byte(`{"e":"trade","s":"BTCUSDT","p":"50000.0","q":"1.0","T":1234567890}`)
+	raw := adapter.RawMessage{
+		Source:     "BINANCE",
+		Payload:    payload,
+		ReceivedAt: time.Now().UnixNano(),
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pm, _ := c.Process(ctx, raw)
+		if ev, ok := pm.Canonical.(*CanonicalEvent); ok {
+			ReleaseEvent(ev)
+		}
+	}
+}

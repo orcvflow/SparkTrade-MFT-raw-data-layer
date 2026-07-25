@@ -88,20 +88,28 @@ func main() {
 		for processed := range pool.Output() {
 			ev, ok := processed.Canonical.(*canonicalizer.CanonicalEvent)
 			if !ok || ev == nil {
-				// Processor produced no canonical event — build a lossless
-				// best-effort fallback that still carries the raw payload.
-				ev = &canonicalizer.CanonicalEvent{
-					EventID:           fmt.Sprintf("evt_%d", time.Now().UnixNano()),
-					Source:            processed.Raw.Source,
-					CanonicalSymbol:   sm.ToCanonical(processed.Raw.Source, ""),
-					ExchangeTimestamp: processed.Raw.ReceivedAt,
-					LocalHWTimestamp:  time.Now().UnixNano(),
-					EventType:         "TRADE",
-					RawPayload:        processed.Raw.Payload,
-					RawFormat:         "JSON",
-				}
+				// Processor produced no canonical event — acquire a pooled one
+				// and build a lossless best-effort fallback that still carries
+				// the raw payload. (Process always returns a pooled event, so
+				// this branch is a safety net; it still pools + releases
+				// uniformly with the normal path below.)
+				ev = canonicalizer.AcquireEvent()
+				ev.EventID = fmt.Sprintf("evt_%d", time.Now().UnixNano())
+				ev.Source = processed.Raw.Source
+				ev.CanonicalSymbol = sm.ToCanonical(processed.Raw.Source, "")
+				ev.ExchangeTimestamp = processed.Raw.ReceivedAt
+				ev.LocalHWTimestamp = time.Now().UnixNano()
+				ev.EventType = "TRADE"
+				ev.RawPayload = processed.Raw.Payload
+				ev.RawFormat = "JSON"
 			}
+			// EncodeCanonical → MarshalProto → ToProto copies every field (incl.
+			// raw_payload) into a fresh proto + fresh bytes, so after this call
+			// the pooled event is no longer referenced. Release it back to the
+			// pool (Addım D): this is the sink that makes the Acquire in Process
+			// a recycle rather than a leak. Safe — no async reader holds ev.
 			msg, err := pipeline.EncodeCanonical(ev)
+			canonicalizer.ReleaseEvent(ev)
 			if err != nil {
 				log.Warn("encode canonical failed", "error", err)
 				continue
