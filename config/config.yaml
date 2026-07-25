@@ -4,7 +4,7 @@
 adapters:
   binance:
     enabled: true
-    endpoint: "wss://testnet.binance.vision/ws"  # Testnet (no real money)
+    endpoint: "wss://stream.binance.com:9443/ws"  # Mainnet public market-data WS (read-only, no credentials). Testnet /ws returns 404 — verified Addım F F3.
     symbols:
       - "btcusdt"
       - "ethusdt"
@@ -59,7 +59,9 @@ storage:
     rotation_size: 104857600  # 100MB
     rotation_count: 10000      # messages
     sync_interval: "1s"
-    
+    mode: "batched"            # Addım F: "batched" (deferred fsync, ~148K msg/s) | "sync" (per-msg fsync, ~20 msg/s, zero in-flight loss)
+    batch_timeout_ms: 50      # batched flush interval (ms); ignored in sync mode
+
   dolphindb:
     enabled: false  # Disabled for MVP - use WAL only
     host: "localhost"

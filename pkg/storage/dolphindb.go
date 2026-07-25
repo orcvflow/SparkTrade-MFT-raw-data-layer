@@ -1,17 +1,22 @@
 package storage
 
-// DolphinDB Batch Writer — HTTP REST API implementation
+// DolphinDB Batch Writer — official api-go (native protocol) implementation.
 //
-// Evidence: DolphinDB exposes an HTTP REST endpoint (POST /run, body = script).
-// The official Go API (github.com/dolphindb/api-go) is NOT a database/sql driver
-// (see https://go.dev/wiki/SQLDrivers — no dolphindb entry), so the previous
-// database/sql approach could never bind a driver and never actually connected.
-// This implementation talks to DolphinDB over its real, documented HTTP REST API:
-//   POST http://host:port/run?user=...&password=...  body: "<DolphinDB script>"
-//   200 OK ⇒ success.  Script uses loadTable() + tableInsert() (see
-//   https://docs.dolphindb.com/en/javadoc/data_writing/ddb_writing_methods.html).
+// Addım F: the prior implementation talked to DolphinDB over HTTP POST /run.
+// Against a LIVE DolphinDB v3 container that path is rejected ("Unsupport http
+// request") — v3's HTTP API is a JSON function-call API, not a raw-script POST.
+// The correct transport is the official Go client (github.com/dolphindb/api-go),
+// which speaks DolphinDB's native binary protocol on :8848. This file uses it.
 //
-// Lossless design (never lose data) — preserved from the prior version:
+// Transport seam: every DolphinDB round-trip goes through the scriptRunner
+// interface. The production implementation is apiGoRunner (api-go); tests inject
+// a fakeScriptRunner (see dolphindb_transport_test.go). The interface exists
+// specifically so the unit test layer does NOT depend on a permissive HTTP mock
+// that accepted any POST /run body — the bug class that hid 3 production
+// script defects (testnet 404, ensureTables syntax, buildInsertScript form)
+// until live validation in Addım F.
+//
+// Lossless design (never lose data) — unchanged by the transport migration:
 //  1. Every event is written to WAL synchronously on arrival.
 //  2. The event is also appended to the in-memory batch for a DB write.
 //  3. flush() writes the batch to DolphinDB when connected; if the DB is down
@@ -22,16 +27,16 @@ package storage
 // Rules: Never panic, never lose data, bounded queues.
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/dolphindb/api-go/api"
+	"github.com/dolphindb/api-go/dialer"
 
 	"raw-data-layer/pkg/canonicalizer"
 	"raw-data-layer/pkg/health"
@@ -47,9 +52,10 @@ type DolphinDBWriter struct {
 	password string
 	database string // DolphinDB DFS path, e.g. "dfs://raw_data"
 
-	// HTTP
-	baseURL    string
-	httpClient *http.Client
+	// Transport seam (Addım F): api-go native protocol on :8848. Swappable for
+	// tests via newDolphinDBWriterWithRunner. nil only between NewDolphinDBWriter
+	// and the first Connect(); production always sets it in the constructor.
+	runner scriptRunner
 
 	// Batch config
 	batchSize    int
@@ -60,8 +66,16 @@ type DolphinDBWriter struct {
 	batchMu   sync.Mutex
 	connected atomic.Bool
 
-	// WAL fallback
-	wal *WAL
+	// WAL fallback — held as the WALWriter interface so a caller can plug in
+	// either *WAL (sync, durable) or *BatchedWAL (deferred fsync, throughput)
+	// without DolphinDBWriter caring which. Addım F: storage process now selects
+	// the WAL mode from config; this field is the seam.
+	//
+	// TYPED-NIL NOTE: never assign a typed nil (e.g. `var w *WAL; NewDolphinDBWriter(cfg, w)`)
+	// — a non-nil interface wrapping a nil pointer would defeat the `w.wal != nil`
+	// guard below and panic on Write. All call sites pass either a real, non-nil
+	// *WAL/*BatchedWAL from New*WAL or the literal nil. See NewWALWriter.
+	wal WALWriter
 
 	// Stats
 	totalWritten  atomic.Uint64
@@ -104,9 +118,113 @@ func DefaultDolphinDBConfig() DolphinDBConfig {
 	}
 }
 
-// NewDolphinDBWriter creates a new DolphinDB batch writer.
-// wal parameter is optional (nil = no WAL fallback).
-func NewDolphinDBWriter(config DolphinDBConfig, wal *WAL) *DolphinDBWriter {
+// scriptRunner is the transport seam between DolphinDBWriter and DolphinDB.
+// The production implementation (apiGoRunner) uses the official api-go client
+// over the native binary protocol on :8848; tests inject a fakeScriptRunner
+// (see dolphindb_transport_test.go) so the lossless/recovery paths can be
+// exercised without a permissive HTTP mock — the bug class that hid 3 script
+// defects (testnet 404, ensureTables syntax, buildInsertScript form) until live
+// validation in Addım F.
+//
+// connect/close may race with runScript across reconnects, so implementations
+// must guard their own state (apiGoRunner uses a mutex).
+type scriptRunner interface {
+	// connect establishes the transport session (TCP dial + login). Idempotent
+	// across reconnects: a prior session, if any, is closed first. Returns error
+	// on failure; the writer treats this as "DB down" and falls back to WAL.
+	// Never panics.
+	connect(ctx context.Context) error
+	// runScript sends a DolphinDB script. Returns nil only on success. A nil
+	// session (not connected) returns an error, never a panic.
+	runScript(script string) error
+	// close tears down the transport session. Safe to call when not connected.
+	close() error
+}
+
+// apiGoRunner is the production scriptRunner: it talks to DolphinDB via the
+// official api-go client (native protocol on :8848). NewDolphinDBClient only
+// allocates (dialer.NewConn does NOT dial — the TCP dial happens in Connect()),
+// so constructing a runner is free of network I/O; the dial occurs in connect().
+type apiGoRunner struct {
+	addr string // "host:port"
+	user string
+	pass string
+
+	mu sync.Mutex
+	db api.DolphinDB // nil until connect() succeeds; nil on close() or connect failure
+}
+
+// newAPIGoRunner builds a production runner. No network I/O here.
+func newAPIGoRunner(host string, port int, user, pass string) *apiGoRunner {
+	return &apiGoRunner{
+		addr: fmt.Sprintf("%s:%d", host, port),
+		user: user,
+		pass: pass,
+	}
+}
+
+func (r *apiGoRunner) connect(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Tear down any prior session before opening a new one (reconnect path).
+	if r.db != nil {
+		_ = r.db.Close()
+		r.db = nil
+	}
+
+	db, err := api.NewDolphinDBClient(ctx, r.addr, &dialer.BehaviorOptions{})
+	if err != nil {
+		return fmt.Errorf("new client %s: %w", r.addr, err)
+	}
+	if err := db.Connect(); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("connect %s: %w", r.addr, err)
+	}
+	if err := db.Login(&api.LoginRequest{UserID: r.user, Password: r.pass}); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("login: %w", err)
+	}
+	r.db = db
+	return nil
+}
+
+func (r *apiGoRunner) runScript(script string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.db == nil {
+		return fmt.Errorf("dolphindb not connected")
+	}
+	if _, err := r.db.RunScript(script); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *apiGoRunner) close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.db == nil {
+		return nil
+	}
+	err := r.db.Close()
+	r.db = nil
+	return err
+}
+
+// NewDolphinDBWriter creates a new DolphinDB batch writer backed by the api-go
+// native client. wal is optional (nil = no WAL fallback). Accepts the WALWriter
+// interface so either *WAL (sync) or *BatchedWAL (deferred) can back it.
+// Constructor does NO network I/O — connect happens lazily in Connect().
+func NewDolphinDBWriter(config DolphinDBConfig, wal WALWriter) *DolphinDBWriter {
+	return newDolphinDBWriterWithRunner(config, wal,
+		newAPIGoRunner(config.Host, config.Port, config.Username, config.Password))
+}
+
+// newDolphinDBWriterWithRunner builds a writer with an injected scriptRunner.
+// Production callers use NewDolphinDBWriter (apiGoRunner); tests inject a fake
+// to exercise write/recovery paths without a live DB.
+func newDolphinDBWriterWithRunner(config DolphinDBConfig, wal WALWriter, runner scriptRunner) *DolphinDBWriter {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	if config.Database == "" {
@@ -119,8 +237,7 @@ func NewDolphinDBWriter(config DolphinDBConfig, wal *WAL) *DolphinDBWriter {
 		username:     config.Username,
 		password:     config.Password,
 		database:     config.Database,
-		baseURL:      fmt.Sprintf("http://%s:%d", config.Host, config.Port),
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		runner:       runner,
 		batchSize:    config.BatchSize,
 		batchTimeout: config.BatchTimeout,
 		batch:        make([]*canonicalizer.CanonicalEvent, 0, config.BatchSize),
@@ -144,8 +261,12 @@ func (w *DolphinDBWriter) Connect() error {
 		}
 	}()
 
-	if err := w.runScript("1+1"); err != nil {
-		w.addError(fmt.Errorf("connect ping failed: %w", err))
+	// Addım F: api-go native transport. connect() does TCP dial + login; a
+	// refused/unreachable host returns an error here (never panics) and the
+	// writer falls back to WAL. Login already executes a script, so the prior
+	// HTTP "1+1" ping is redundant and dropped.
+	if err := w.runner.connect(w.ctx); err != nil {
+		w.addError(fmt.Errorf("connect failed: %w", err))
 		return fmt.Errorf("DolphinDB connect failed: %w", err)
 	}
 
@@ -301,8 +422,13 @@ func (w *DolphinDBWriter) writeBatch(events []*canonicalizer.CanonicalEvent) err
 }
 
 // buildInsertScript builds a DolphinDB script that bulk-inserts the batch into
-// both raw_events and canonical_events via tableInsert(loadTable(...), vectors).
-// Each batch is a single /run call. Strings are DolphinDB-escaped.
+// both raw_events and canonical_events via loadTable(...).append!(table(...)).
+// Each batch is a single RunScript call. Strings are DolphinDB-escaped.
+//
+// Addım F F2: the prior form `tableInsert(loadTable(...), [vec] as col, ...)`
+// fails on a DFS table in v3 ("Can only append a table to a DFS/disk table") —
+// the named-vector tableInsert form is rejected. append!(table(...)) is the
+// verified-working form (live probe, Addım F F2).
 func (w *DolphinDBWriter) buildInsertScript(events []*canonicalizer.CanonicalEvent) string {
 	if len(events) == 0 {
 		return ""
@@ -322,7 +448,6 @@ func (w *DolphinDBWriter) buildInsertScript(events []*canonicalizer.CanonicalEve
 	canPrices := make([]string, 0, len(events))
 	canSizes := make([]string, 0, len(events))
 	canSides := make([]string, 0, len(events))
-	canRawIDs := make([]string, 0, len(events))
 
 	for _, ev := range events {
 		if ev == nil {
@@ -342,26 +467,25 @@ func (w *DolphinDBWriter) buildInsertScript(events []*canonicalizer.CanonicalEve
 		canPrices = append(canPrices, strconv.FormatFloat(ev.Price, 'f', -1, 64))
 		canSizes = append(canSizes, strconv.FormatFloat(ev.Size, 'f', -1, 64))
 		canSides = append(canSides, ddbString(ev.Side))
-		canRawIDs = append(canRawIDs, ddbString(ev.EventID))
 	}
 
 	var b strings.Builder
 	b.WriteString("try{ ")
-	b.WriteString("rt = loadTable(\"" + w.database + "\", \"raw_events\"); ")
-	b.WriteString("tableInsert(rt, [" + strings.Join(rawIDs, ",") + "] as event_id, ")
+	b.WriteString("loadTable(\"" + w.database + "\", \"raw_events\").append!(table(")
+	b.WriteString("[" + strings.Join(rawIDs, ",") + "] as event_id, ")
 	b.WriteString("[" + strings.Join(rawSources, ",") + "] as source, ")
 	b.WriteString("[" + strings.Join(rawPayloads, ",") + "] as payload, ")
 	b.WriteString("[" + strings.Join(rawReceivedAts, ",") + "] as received_at, ")
-	b.WriteString("[" + strings.Join(rawSeqs, ",") + "] as sequence_num); ")
-	b.WriteString("ct = loadTable(\"" + w.database + "\", \"canonical_events\"); ")
-	b.WriteString("tableInsert(ct, [" + strings.Join(canIDs, ",") + "] as event_id, ")
+	b.WriteString("[" + strings.Join(rawSeqs, ",") + "] as sequence_num)); ")
+	b.WriteString("loadTable(\"" + w.database + "\", \"canonical_events\").append!(table(")
+	b.WriteString("[" + strings.Join(canIDs, ",") + "] as event_id, ")
 	b.WriteString("[" + strings.Join(canSymbols, ",") + "] as symbol, ")
 	b.WriteString("[" + strings.Join(canExchTS, ",") + "] as exchange_ts, ")
 	b.WriteString("[" + strings.Join(canLocalTS, ",") + "] as local_ts, ")
 	b.WriteString("[" + strings.Join(canPrices, ",") + "] as price, ")
 	b.WriteString("[" + strings.Join(canSizes, ",") + "] as size, ")
 	b.WriteString("[" + strings.Join(canSides, ",") + "] as side, ")
-	b.WriteString("[" + strings.Join(canTypes, ",") + "] as event_type); ")
+	b.WriteString("[" + strings.Join(canTypes, ",") + "] as event_type)); ")
 	b.WriteString("}catch(ex){ throw ex };")
 	return b.String()
 }
@@ -374,8 +498,8 @@ func ddbString(s string) string {
 	return "\"" + r.Replace(s) + "\""
 }
 
-// runScript sends a DolphinDB script to the /run endpoint over HTTP POST.
-// Returns nil only on HTTP 200.
+// runScript sends a DolphinDB script over the api-go native transport. Returns
+// nil only on success. Never panics. The runner guards its own session state.
 func (w *DolphinDBWriter) runScript(script string) error {
 	// Never panic
 	defer func() {
@@ -384,53 +508,42 @@ func (w *DolphinDBWriter) runScript(script string) error {
 		}
 	}()
 
-	if w.httpClient == nil {
-		return fmt.Errorf("http client not initialized")
-	}
+	return w.runner.runScript(script)
+}
 
-	endpoint := fmt.Sprintf("%s/run?user=%s&password=%s",
-		w.baseURL,
-		w.username,
-		w.password)
-
-	req, err := http.NewRequestWithContext(w.ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(script)))
-	if err != nil {
-		return fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Content-Type", "text/plain")
-
-	resp, err := w.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("http do: %w", err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("dolphindb status %d: %s", resp.StatusCode, string(body))
-	}
-	// Drain body so the connection can be reused.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	return nil
+// ensureTablesScript returns the DolphinDB script that creates the raw_events
+// and canonical_events tables (and the DFS database) if they do not yet exist.
+// Extracted so a live integration test (and the api-go migration) can run the
+// SAME script the production path uses, without going through the HTTP transport.
+func (w *DolphinDBWriter) ensureTablesScript() string {
+	// Correct DolphinDB v3 DFS table creation. The prior script (VALUE partition
+	// with bare symbol literals + createTable on a DFS path) was malformed and
+	// never validated against a live instance — the httptest mock accepted any
+	// POST /run body so the syntax error went uncaught (Addım F F2 live test).
+	//
+	// Fix: partition the database by HASH on a SYMBOL column (event_id is present
+	// in BOTH tables), so a single DB-level scheme serves both. createPartitionedTable
+	// (not createTable) is the correct primitive for a DFS partitioned table.
+	return `
+if(!existsDatabase("` + w.database + `")){
+	database("` + w.database + `", HASH, [SYMBOL, 4]);
+};
+db = database("` + w.database + `");
+if(!existsTable("` + w.database + `", "raw_events")){
+	s = table(1:0, ` + "`event_id`source`payload`received_at`sequence_num" + `, [SYMBOL,SYMBOL,STRING,LONG,LONG]);
+	createPartitionedTable(db, s, "raw_events", "event_id");
+};
+if(!existsTable("` + w.database + `", "canonical_events")){
+	s2 = table(1:0, ` + "`event_id`symbol`exchange_ts`local_ts`price`size`side`event_type" + `, [SYMBOL,SYMBOL,LONG,LONG,DOUBLE,DOUBLE,SYMBOL,SYMBOL]);
+	createPartitionedTable(db, s2, "canonical_events", "event_id");
+};`
 }
 
 // ensureTables creates the DolphinDB tables if they don't exist.
 // Best-effort: a failure is logged but does not block writes (WAL is the
 // durable fallback).
 func (w *DolphinDBWriter) ensureTables() error {
-	script := `
-if(!existsDatabase("` + w.database + `")){
-	db = database("` + w.database + `", VALUE, ` + "`source`" + `, ` + "`BTC/USD`" + `);
-};
-if(!existsTable("` + w.database + `", "raw_events")){
-	tableInsert(createTable(database("` + w.database + `"), "raw_events", event_id SYMBOL, source SYMBOL, payload STRING, received_at LONG, sequence_num LONG));
-};
-if(!existsTable("` + w.database + `", "canonical_events")){
-	tableInsert(createTable(database("` + w.database + `), "canonical_events", event_id SYMBOL, symbol SYMBOL, exchange_ts LONG, local_ts LONG, price DOUBLE, size DOUBLE, side SYMBOL, event_type SYMBOL));
-};`
-	return w.runScript(script)
+	return w.runScript(w.ensureTablesScript())
 }
 
 // reconnectLoop attempts to reconnect to DolphinDB with exponential backoff.
@@ -543,6 +656,9 @@ func (w *DolphinDBWriter) Stop() error {
 	w.wg.Wait()
 
 	w.connected.Store(false)
+
+	// Addım F: tear down the api-go session. Safe if never connected.
+	_ = w.runner.close()
 
 	return nil
 }

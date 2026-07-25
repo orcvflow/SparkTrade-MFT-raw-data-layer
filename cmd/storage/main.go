@@ -38,21 +38,26 @@ func main() {
 	log.Info("storage process starting", "port", cfg.Processes.StorageHealthPort)
 
 	// WAL — always started, even with DolphinDB enabled (WAL is the durable fallback).
+	// Addım F: durability mode is config-driven. Default "batched" (deferred fsync,
+	// ~4500× faster than sync per Addım E E1). "sync" → per-message fsync, zero
+	// in-flight loss on crash but ~20 msg/s. Both satisfy WALWriter.
 	walCfg := storage.WALConfig{
 		Directory:      cfg.Storage.WAL.Directory,
 		MaxFileSize:    cfg.Storage.WAL.RotationSize,
 		MaxMessages:    cfg.Storage.WAL.RotationCount,
 		RotateInterval: config.ParseDur(cfg.Storage.WAL.SyncInterval, 1*time.Minute),
 	}
-	wal, err := storage.NewWAL(walCfg)
+	batchTimeout := time.Duration(cfg.Storage.WAL.BatchTimeoutMs) * time.Millisecond
+	wal, err := storage.NewWALWriter(walCfg, cfg.Storage.WAL.Mode, batchTimeout)
 	if err != nil {
-		log.Error("WAL init failed", "error", err)
+		log.Error("WAL init failed", "error", err, "mode", cfg.Storage.WAL.Mode)
 		os.Exit(1)
 	}
 	if err := wal.Start(); err != nil {
 		log.Error("WAL start failed", "error", err)
 		os.Exit(1)
 	}
+	log.Info("WAL started", "mode", cfg.Storage.WAL.Mode, "batch_timeout_ms", cfg.Storage.WAL.BatchTimeoutMs)
 
 	// DolphinDB writer (WAL-backed; DB is best-effort).
 	dbCfg := storage.DolphinDBConfig{

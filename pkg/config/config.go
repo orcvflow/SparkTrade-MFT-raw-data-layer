@@ -98,11 +98,13 @@ type StorageConf struct {
 }
 
 type WALConf struct {
-	Enabled       bool   `yaml:"enabled"`
-	Directory     string `yaml:"directory"`
-	RotationSize  int64  `yaml:"rotation_size"`
-	RotationCount int64  `yaml:"rotation_count"`
-	SyncInterval  string `yaml:"sync_interval"`
+	Enabled        bool   `yaml:"enabled"`
+	Directory      string `yaml:"directory"`
+	RotationSize   int64  `yaml:"rotation_size"`
+	RotationCount  int64  `yaml:"rotation_count"`
+	SyncInterval   string `yaml:"sync_interval"`
+	Mode           string `yaml:"mode"`             // "sync" | "batched" (default "batched" — Addım F)
+	BatchTimeoutMs int    `yaml:"batch_timeout_ms"`  // batched flush interval (default 50ms)
 }
 
 type DolphinDBConf struct {
@@ -178,7 +180,7 @@ func DefaultConfig() Config {
 		MappingsDir: "./mappings",
 		Adapters: AdaptersConfig{
 			Binance: BinanceConfig{
-				Enabled: true, Endpoint: "wss://testnet.binance.vision/ws",
+				Enabled: true, Endpoint: "wss://stream.binance.com:9443/ws", // mainnet public market-data WS (testnet /ws is 404 — verified Addım F F3)
 				Symbols: []string{"btcusdt", "ethusdt", "bnbusdt"},
 				Reconnect: ReconnectConf{MaxAttempts: 10, BackoffSeconds: []int{1, 2, 4, 8, 16, 30}},
 				HeartbeatInterval: "30s", SessionRotation: "24h",
@@ -198,7 +200,7 @@ func DefaultConfig() Config {
 			HeartbeatInterval: "5s", HWM: 10000,
 		}},
 		Storage: StorageConf{
-			WAL: WALConf{Enabled: true, Directory: "./data/wal", RotationSize: 104857600, RotationCount: 10000, SyncInterval: "1s"},
+			WAL: WALConf{Enabled: true, Directory: "./data/wal", RotationSize: 104857600, RotationCount: 10000, SyncInterval: "1s", Mode: "batched", BatchTimeoutMs: 50},
 			DolphinDB: DolphinDBConf{Enabled: false, Host: "localhost", Port: 8848, Username: "admin", Password: "123456", Database: "dfs://raw_data", BatchSize: 1000, BatchTimeout: "1s"},
 		},
 		Validation: ValidationConf{Enabled: true, Layers: LayersConf{true, true, true, true, true}},
@@ -283,6 +285,17 @@ func applyDefaults(c *Config) {
 	}
 	if c.Storage.WAL.SyncInterval == "" {
 		c.Storage.WAL.SyncInterval = "1s"
+	}
+	// Addım F: production default is batched WAL. The Addım E E1 benchmark
+	// measured sync WAL as fsync-bound (~20 msg/s, p99 ~104ms) vs batched
+	// (148K msg/s, p99 26µs). Empty/unknown → batched (never crash).
+	walMode := strings.ToLower(strings.TrimSpace(c.Storage.WAL.Mode))
+	if walMode == "" {
+		walMode = "batched"
+		c.Storage.WAL.Mode = walMode
+	}
+	if c.Storage.WAL.BatchTimeoutMs <= 0 {
+		c.Storage.WAL.BatchTimeoutMs = 50
 	}
 	if c.Publisher.Zeromq.HWM <= 0 {
 		c.Publisher.Zeromq.HWM = 10000

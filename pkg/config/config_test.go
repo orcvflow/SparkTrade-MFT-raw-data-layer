@@ -143,8 +143,13 @@ func TestLoad_RealProjectYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load real config: %v", err)
 	}
-	if cfg.Adapters.Binance.Endpoint != "wss://testnet.binance.vision/ws" {
+	if cfg.Adapters.Binance.Endpoint != "wss://stream.binance.com:9443/ws" {
 		t.Errorf("binance endpoint: %q", cfg.Adapters.Binance.Endpoint)
+	}
+	// Addım F F3: testnet /ws is 404 (verified live); mainnet public market-data
+	// WS is the production endpoint. WAL defaults to batched (F1).
+	if cfg.Storage.WAL.Mode != "batched" {
+		t.Errorf("wal mode: %q (want batched — Addım F default)", cfg.Storage.WAL.Mode)
 	}
 	if cfg.WorkerPool.Workers != 50 {
 		t.Errorf("workers: %d", cfg.WorkerPool.Workers)
