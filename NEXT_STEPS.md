@@ -1,8 +1,10 @@
 # Raw Data Layer — Next Steps & Future Work
 
-**MVP Status:** ✅ Complete (18/18 tasks implemented)  
+**MVP Status:** ✅ Complete (18/18 tasks) + Addım C (multi-process) + Addım D (SIMD/zero-copy)  
+**Merge Status:** ✅ `main` → `7988f94` (C+D ff-merge, 2026-07-25); `v0.4.0` tag  
 **Build Status:** ✅ All packages compile; `go vet` clean  
-**Test Status:** ✅ All passing — full suite + `-race` green (2026-07-24)
+**Test Status:** ✅ All passing — full suite + `-race` green + regression green (2026-07-25)  
+**Next Phase:** Addım E — Production Deployment (see `STEP-D.md` §8)
 
 ## Immediate Fixes — ✅ Resolved (2026-07-24)
 
@@ -39,6 +41,22 @@ with an empty provider symbol → always "UNKNOWN". Added `Canonical any` to
 `ProcessedMessage`; `outputPipeline` now uses `processed.Canonical` directly
 (`pkg/canonicalizer/worker.go`, `pkg/workerpool/pool.go`, `cmd/raw-data-layer/main.go`).
 
+## Addım E — Production Deployment (Sonrakı fazə)
+
+Addım D (code-only optimizasiya) bitdi. Addım E system-level ölçüm və canlı deploy. Tam yol xəritəsi: `STEP-D.md` §8.
+
+| Task | Əhatə | Status |
+|------|-------|--------|
+| E1 Production benchmark CLI | `./bin/adapter --benchmark` — throughput/latency p50-p99/GC/mem; **spec hədəflərini (200K msg/s, <500µs p99, <100ms GC, <2GB) BURADA ölçürük** | ⏳ |
+| E2 Grafana dashboard | Throughput, Latency p50/p95/p99, GC pause, Memory, CPU, Queue depth | ⏳ |
+| E3 Kubernetes manifests | 4 process üçün Deployment/Service/ConfigMap/Secrets/HPA | ⏳ |
+| E4 Helm Chart | `values.yaml` + `templates/` | ⏳ |
+| E5 Prometheus + ServiceMonitor | Metrika toplama (endpoint `pkg/health`-də hazırdır) | ⏳ |
+| E6 ELK Stack | Filebeat + Elasticsearch + Kibana (struktur log-lar `pkg/pipeline`-də hazırdır) | ⏳ |
+| E7 CI/CD | GitHub Actions: build→test→race→bench-regression | ⏳ |
+
+7-gün planı və Addım E diqqət nöqtələri: `STEP-D.md` §8.2-§8.4.
+
 ## Post-MVP Improvements (Priority: Medium)
 
 ### A. Additional Adapters (1 week each)
@@ -50,10 +68,10 @@ with an empty provider symbol → always "UNKNOWN". Added `Canonical any` to
 6. **Alpha Vantage** (REST API)
 
 ### B. Advanced Features (2-4 weeks each)
-1. **Multi-process deployment** (Homalos model)
-   - Split adapters → processors → distributors
-   - Inter-process communication via ZeroMQ
-   - Process isolation (if one adapter crashes, others survive)
+1. ✅ **Multi-process deployment** (Homalos model) — **Addım C tamamlandı (2026-07-25, `9daec88`)**
+   - 4 isolated process: adapter / canonicalizer / publisher / storage (UDS + Protobuf, ZeroMQ əvəzinə)
+   - Process isolation: bir crash digərlərini aparmır; `pkg/process` supervisor auto-restart edir
+   - Detallar: `ADDIM_C_PHASES.md`, `PROGRESS.md` Step C bölməsi
 
 2. **Kubernetes operator** 
    - Custom Resource Definitions (CRDs)
@@ -76,24 +94,20 @@ with an empty provider symbol → always "UNKNOWN". Added `Canonical any` to
    - Time-travel debugging
    - Market simulation mode
 
-### C. Performance Optimizations (1-2 weeks each)
-1. **SIMD for price parsing**
-   - Use Go assembly for hot paths
-   - Batch processing improvements
+### C. Performance Optimizations
 
-2. **Memory pool for event allocation**
-   - Reduce GC pressure
-   - Reuse event objects
+**1-4 tamamlandı (Addım D — SIMD/Zero-Copy, 2026-07-25, `v0.4.0`):**
 
-3. **Zero-copy deserialization**
-   - Avoid copying raw payloads
-   - Use `bytes.Buffer` pooling
+1. ✅ **SIMD JSON parsing** — ByteDance Sonic (SIMD+JIT) into typed `Trade` struct (`pkg/parser/sonic.go`). 3.5× faster, 9.3× fewer allocs vs köhnə `map[string]any` yolu.
+2. ✅ **Memory pool for event allocation** — generic `allocator.Pool[T]` ilə `CanonicalEvent` recycling (`pkg/allocator/pool.go`). Process pooled: 7→6 allocs.
+3. ✅ **Zero-copy deserialization** — mmap ITCH parser (`pkg/parser/itch_mmap.go`), `bufio` əvəzinə. 1.9× faster, 13.4× less memory.
+4. ✅ **Lock-free data structures** — `atomic.Pointer[sideBook]` order book (`pkg/orderbook/lockfree.go`), `sync.RWMutex` əvəzinə. ~890× read path.
 
-4. **Lock-free data structures**
-   - Replace sync.RWMutex with atomic operations
-   - Ring buffer for high-frequency data
+Detallar və measured numbers: `STEP-D.md`. Regression guard-lar: `test/regression/` (7 machine-robust invarian).
 
-5. **FPGA acceleration for critical path**
+**Qalıq (gələcək):**
+
+5. ⏳ **FPGA acceleration for critical path**
    - Hardware offload for price validation
    - Custom IP cores for message parsing
 
@@ -334,9 +348,11 @@ The Raw Data Layer MVP is **complete and functional**, with all 18 tasks impleme
 5. **Features comprehensive testing:** Unit + integration + chaos + death tests
 
 **Next immediate steps:**
-1. ~~Fix the 4 failing tests (overflow, autoscaling, WAL replay, DB timeout)~~ — ✅ done 2026-07-24 (plus WAL rotation race + canonicalizer result-drop)
-2. Deploy to staging environment
-3. Load test with 100K+ msg/sec
-4. Begin production rollout
+1. ~~Fix the 4 failing tests~~ — ✅ done 2026-07-24
+2. ~~Addım C (multi-process)~~ — ✅ done 2026-07-25 (`9daec88`)
+3. ~~Addım D (SIMD/zero-copy)~~ — ✅ done 2026-07-25 (`7988f94`, merged to `main`, `v0.4.0`)
+4. ⏳ `git push origin main --tags` — outward-facing, istifadəçi təsdiqi gözləyir
+5. Addım E Task E1 — production benchmark CLI (spec hədəflərini ölç)
+6. Addım E Task E2-E7 — deploy infra (K8s, Grafana, ELK, CI/CD)
 
 The system is ready to serve as the foundation for sophisticated multi-asset trading systems, with a clear path for future expansion and improvement.

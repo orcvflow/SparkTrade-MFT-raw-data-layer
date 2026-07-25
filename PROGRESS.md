@@ -286,7 +286,45 @@ Phase 3-4 makes the decorative `config.yaml` real, extracts a reusable health se
 - The publisher forwards the canonical bytes byte-for-byte (no re-encode) — correct, but means the storage process **must** agree on the exact proto schema (it does; same `canonical.proto`). A schema mismatch would corrupt silently.
 - On graceful shutdown while a downstream is **down**, `client.Flush` blocks until its 10s timeout, then `Stop` removes the spool — the one bounded-loss window (only at shutdown+downstream-down; a crash mid-flight keeps the spool for replay on restart).
 - Per-message WAL `fsync` in the storage handler is a throughput bottleneck (durability-first); the canonicalizer→publisher→storage backpressure is bounded by the spool. A batched/async WAL is a future optimization.
-- Phase 5-8 remain: integration tests (`//go:build integration`), chaos tests (`//go:build chaos`), systemd units, docker-compose.multi, prometheus.
+- Phase 5-8 remain: integration tests (`//go:build integration`), chaos tests (`//go:build chaos`), systemd units, docker-compose.multi, prometheus. *(Step C Phase 5-8 sonradan tamamlandı — integration/chaos/systemd/docker-compose.multi/prometheus; yuxarıdakı "Phase 5-8 remain" satırı Phase 3-4 vaxtından qalıbdır, Step C bütövlükdə `9daec88`-də closed-dir.)*
+
+### Step D — SIMD/Zero-Copy Performance Optimization (2026-07-25)
+Addım D hot path-i optimize edir: Sonic SIMD+JIT JSON parser (typed `Trade` struct, `map[string]any` əvəzinə), mmap zero-copy ITCH binary parser (`bufio` əvəzinə), `sync.Pool` ilə `CanonicalEvent` recycling, və `atomic.Pointer` ilə lock-free order book (`sync.RWMutex` əvəzinə). Spec-in kodunda 4 bug var idi — yazmazdan əvvəl API-ları doğruladıb düzəltdim (heç birini yazmadan).
+
+**Built:**
+- `pkg/parser/sonic.go` — ByteDance Sonic into typed `Trade`; `ParseTrade`/`ParseTradeInto` (named returns + recover → panic-i error-a çevirir); `ParseTradeStd`/`ParseTradeMapStd` baseline-lər.
+- `pkg/parser/itch_mmap.go` — `*mmap.ReaderAt` üzərində zero-copy parser; `At(i)` byte-byte big-endian u64/i64/symbol (bounds-checked); `ITCHBufioReader` baseline.
+- `pkg/allocator/pool.go` — generic `Pool[T]` (`sync.Pool` wrapper + Reset hook); allocator↔canonicalizer import tsiklini qırır.
+- `pkg/orderbook/lockfree.go` — `atomic.Pointer[sideBook]` immutable snapshot; `MutexOrderBook` baseline; spec-in `unsafe.Pointer(&local)` UB-si düzəldildi.
+- `pkg/canonicalizer/worker.go` — Sonic+strconv (fmt.Sscanf əvəzinə), map discard, `AcquireEvent`/`ReleaseEvent` pool lifecycle, `Reset()`, `parseBinanceInto`/`parseIBInto`.
+- `cmd/canonicalizer/main.go` — `ReleaseEvent(ev)` output loop-da `EncodeCanonical`-dən sonra (MarshalProto/ToProto bütün field-ləri kopyalayır → release təhlükəsizdir).
+- `test/regression/regression_test.go` (`//go:build regression`) — 7 machine-robust RELATIVE invarian.
+
+**Spec-dən kənara çıxan düzəlişlər (spec-in kodu compile olmazdı / UB idi):**
+1. `allocator.EventPool` spec snippet-i import tsikli yaradırdı → generic `allocator.Pool[T]` ilə qırıldı.
+2. `mmap.ReaderAt`-da `Data()` YOXDUR (yalnız `Open/At/Len/ReadAt/Close`) → `At(i)` byte-byte oxu istifadə olundu.
+3. Lock-free snippet `unsafe.Pointer(&local)` stack slice-header-ə UB idi → `atomic.Pointer[sideBook]` (heap immutable snapshot) ilə düzəldildi.
+4. `CanonicalEvent.Reset()` yox idi → əlavə olundu (Levels capacity qorunur `[:0]`, pointer metadata drop).
+
+**Measured benchmarks** (Intel i5-3330S @2.70GHz, merge-dən sonra təzə run) — absolut ns machine-load ilə dəyişir, nisbətlər stabildir (regression testləri bunları yoxlayır):
+- **Sonic JSON:** 1386 ns/2 allocs (SonicInto, hot path) vs stdlib-typed 4507/9 (2.4×) vs köhnə map 6574/28 (**3.5× faster, 9.3× fewer allocs**).
+- **mmap ITCH:** 7.6ms/380KB/95k allocs vs bufio 14.3ms/5.08MB/195k allocs (**1.9× faster, 13.4× less memory**). Spec-in "20×" iddiası DataSea 12TB-log rəqəmidir (CLAUDE.md ⚠️ təsdiqlənməmiş) — burada honest 1.9-2.2×.
+- **sync.Pool:** recycled 0 allocs vs new 1 alloc; canonicalizer Process pooled 2097 ns/6 allocs vs non-pooled 2850/7 (**1.36× faster, 1 fewer alloc**).
+- **Lock-free OB:** 3.0 ns/0 allocs vs mutex 2689 ns/1 alloc (~890× read path; ratio mutex baseline-i izləyir, lock-free ~3ns sabit).
+
+**Verification:**
+- `go build ./...` clean. `go test ./pkg/... -cover` — 16 paket yaşıl (coverage 51.4%-100%, əksəri 80%+). `go test -tags=regression ./test/regression/...` yaşıl (0.7s). `go test ./... -race -timeout 300s` **tam suite yaşıl** (chaos 28s + integration 16s daxil, race-free).
+- Regression testləri **`-race`-siz işləyir** (performance testləri üçün standart; `-race` Sonic JIT + mmap byte-byte access-i 20-30× korlayır). Race-safety əsas `-race` suite-indəki `pkg/orderbook` concurrent testi ilə örtülüb.
+
+**Merge + tag:**
+- `main`: `acb9a03` → `7988f94` (C + D birlikdə, fast-forward, 78 fayl +12146 sətir).
+- `v0.4.0` annotated tag yaradıldı (honest mesaj: komponent rəqəmləri "MEASURED", system-level hədəflər "to be MEASURED by Addım E" — istifadəçinin təklif etdiyi "benchmark verified" mesajı düzəldildi, çünki system-level rəqəmlər hələ ölçülməyib).
+- `git push origin main --tags` — outward-facing olduğu üçün istifadəçi təsdiqini gözləyir.
+
+**Honest limitations:**
+- System-level hədəflər (200K msg/s, <500µs p99, <100ms GC, <2GB) **deployment benchmark-ləridir** (Addım E Task E1), unit test-də assert olunmayıb — flaky olardı. Komponent benchmark-ləri verified-dir.
+- `pkg/orderbook` coverage 51.4% (happy path əhatə olunub, edge case-lər Addım E-də). IB adapter hələ simplified protocol (MVP scope).
+- Addım D Tam Yekunlaşma sənədi: `STEP-D.md`. Addım E (production deployment) yol xəritəsi: `STEP-D.md` §8.
 
 ### No Remaining Failures
 All previously-listed "Known Limitations" (overflow, autoscaling, WAL replay, DB timeout) are resolved and verified under `-race`.
