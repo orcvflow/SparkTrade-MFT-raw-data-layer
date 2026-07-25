@@ -20,6 +20,9 @@ func TestMathSanitizer_SanitizePrice(t *testing.T) {
 		{"Negative infinity", math.Inf(-1), 0.0},
 		{"Zero", 0.0, 0.0},
 		{"Very small positive", 0.0001, 0.0001},
+		{"Overflow 1e308", 1e308, 0.0}, // Astronomically large → sanitized
+		{"Large but valid 1e14", 1e14, 1e14},
+		{"At threshold 1e15", 1e15, 1e15}, // Exactly at threshold is OK
 	}
 
 	for _, tt := range tests {
@@ -115,6 +118,63 @@ func TestMathSanitizer_SafeDivide(t *testing.T) {
 				}
 			} else if result != tt.expected {
 				t.Errorf("SafeDivide() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMathSanitizer_SanitizeSize(t *testing.T) {
+	sanitizer := NewMathSanitizer()
+
+	tests := []struct {
+		name     string
+		input    float64
+		expected float64
+	}{
+		{"Valid positive size", 1.5, 1.5},
+		{"Zero size", 0.0, 0.0},
+		{"Negative size", -10.0, 0.0},
+		{"NaN", math.NaN(), 0.0},
+		{"Positive infinity", math.Inf(1), 0.0},
+		{"Negative infinity", math.Inf(-1), 0.0},
+		{"Large valid size", 1e8, 1e8},
+		{"Very small positive", 0.0001, 0.0001},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizer.SanitizeSize(tt.input)
+			if math.IsNaN(tt.expected) {
+				if !math.IsNaN(result) {
+					t.Errorf("SanitizeSize() = %v, want NaN", result)
+				}
+			} else if result != tt.expected {
+				t.Errorf("SanitizeSize() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMathSanitizer_IsValid(t *testing.T) {
+	sanitizer := NewMathSanitizer()
+
+	tests := []struct {
+		name     string
+		input    float64
+		expected bool
+	}{
+		{"Normal value", 100.5, true},
+		{"Zero", 0.0, true},
+		{"Negative value", -50.0, true},
+		{"NaN", math.NaN(), false},
+		{"Positive infinity", math.Inf(1), false},
+		{"Negative infinity", math.Inf(-1), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if result := sanitizer.IsValid(tt.input); result != tt.expected {
+				t.Errorf("IsValid(%v) = %v, want %v", tt.input, result, tt.expected)
 			}
 		})
 	}

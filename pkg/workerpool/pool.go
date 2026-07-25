@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"raw-data-layer/pkg/adapter"
+	"raw-data-layer/pkg/health"
 )
 
 // Pool manages a bounded pool of workers for processing messages
@@ -29,6 +30,7 @@ type Pool struct {
 	processed     atomic.Uint64
 	dropped       atomic.Uint64
 	errors        atomic.Uint64
+	stopped       atomic.Bool // set by Stop() so Submit can reject without racing a channel close
 	
 	// Synchronization
 	ctx        context.Context
@@ -51,10 +53,13 @@ type Pool struct {
 	lastScaleCheck   time.Time
 }
 
-// ProcessedMessage represents a processed message ready for canonicalization
+// ProcessedMessage represents a processed message ready for downstream stages.
+// Canonical holds the fully-built canonical event produced by the processor
+// (typed as `any` to avoid an import cycle between workerpool and canonicalizer).
 type ProcessedMessage struct {
-	Raw       adapter.RawMessage
-	Error     error
+	Raw         adapter.RawMessage
+	Canonical   any
+	Error       error
 	ProcessedAt int64
 }
 
@@ -140,14 +145,22 @@ func (p *Pool) Submit(msg adapter.RawMessage) error {
 			p.addError(fmt.Errorf("panic in Submit: %v", r))
 		}
 	}()
-	
+
+	if p.stopped.Load() {
+		p.dropped.Add(1)
+		health.Backpressure.Inc()
+		return fmt.Errorf("worker pool stopped")
+	}
+
 	select {
 	case p.input <- msg:
 		p.queueDepth.Add(1)
+		health.QueueDepth.Set(float64(p.queueDepth.Load()))
 		return nil
 	default:
 		// Queue full - backpressure engaged
 		p.dropped.Add(1)
+		health.Backpressure.Inc()
 		return fmt.Errorf("worker pool queue full (size: %d)", p.queueSize)
 	}
 }
@@ -182,13 +195,29 @@ func (p *Pool) worker() {
 	for {
 		select {
 		case <-p.ctx.Done():
-			return
+			// Context cancelled (e.g. Stop()). Before exiting, drain any
+			// messages already queued so a graceful shutdown does not drop
+			// in-flight work. Non-blocking: once the queue is empty, exit.
+			for {
+				select {
+				case msg, ok := <-p.input:
+					if !ok {
+						return
+					}
+					p.queueDepth.Add(-1)
+					health.QueueDepth.Set(float64(p.queueDepth.Load()))
+					p.processMessage(msg)
+				default:
+					return
+				}
+			}
 		case msg, ok := <-p.input:
 			if !ok {
 				return
 			}
-			
+
 			p.queueDepth.Add(-1)
+			health.QueueDepth.Set(float64(p.queueDepth.Load()))
 			p.processMessage(msg)
 		}
 	}
@@ -220,11 +249,17 @@ func (p *Pool) processMessage(msg adapter.RawMessage) {
 		}
 	}
 	
-	// Send to output (non-blocking)
+	// Mark the message as processed BEFORE delivering it. The output channel is
+	// buffered, so a consumer that receives from Output() and then immediately
+	// reads Stats() must already see the increment — otherwise there is a
+	// logical race (send → consumer reads → worker finally increments). On the
+	// rare blocked-delivery path we also count a drop (not delivered).
+	p.processed.Add(1)
+	health.MessagesProcessed.WithLabelValues(msg.Source).Inc()
+	p.lastProcessed.Store(time.Now())
+
 	select {
 	case p.output <- processed:
-		p.processed.Add(1)
-		p.lastProcessed.Store(time.Now())
 	case <-time.After(1 * time.Second):
 		p.dropped.Add(1)
 		p.addError(fmt.Errorf("output channel blocked"))
@@ -281,13 +316,19 @@ func (p *Pool) checkScale() {
 	p.lastScaleCheck = time.Now()
 }
 
-// Stop gracefully stops the worker pool
+// Stop gracefully stops the worker pool.
+//
+// Race safety: we set `stopped` and cancel the context but do NOT close the
+// input channel. Workers exit on ctx.Done() after draining queued messages.
+// Closing p.input here would race any in-flight Submit() (a submitter goroutine
+// can still be running — e.g. an adapter bridge), producing a
+// send-on-closed-channel data race. Leaving the buffered channel open and
+// rejecting new submits via the atomic `stopped` flag is race-free; the channel
+// is simply GC'd once the pool is unreachable.
 func (p *Pool) Stop() error {
+	p.stopped.Store(true)
 	p.cancel()
-	
-	// Close input channel
-	close(p.input)
-	
+
 	// Wait for all workers to finish
 	p.wg.Wait()
 	

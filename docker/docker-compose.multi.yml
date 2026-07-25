@@ -1,0 +1,158 @@
+# Raw Data Layer — Multi-Process deployment (Addım C / Homalos pattern).
+#
+# 4 isolated services (adapter/canonicalizer/publisher/storage) built from one
+# image, each running a different binary. They communicate over UDS+Protobuf via
+# a shared `rdl-sock` volume mounted at /run/rdl (UDS works across containers only
+# on a shared filesystem). One crash is isolated; `restart: unless-stopped` +
+# the supervisor contract (Restart=always in systemd, mirrored here) brings a
+# crashed service back; the lossless on-disk IPC spool holds data during outages.
+#
+# Up:        docker compose -f docker/docker-compose.multi.yml up --build
+# Health:    curl :8081/live  :8082/live  :8083/live  :8084/live
+# Metrics:   curl :8081/metrics ... (scraped by Prometheus, see config/prometheus.yml)
+#
+# NOTE: UDS across containers requires the shared /run/rdl volume. If you prefer
+# network-isolated services, switch the IPC layer to TCP (a future extension —
+# pkg/ipc currently uses UDS only).
+
+version: "3.8"
+
+services:
+  storage:
+    image: raw-data-layer
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: rdl-storage
+    command: ["/app/storage", "-config", "/app/config/config.multi.yaml"]
+    environment:
+      - WAL_DIR=/var/log/raw_data/wal
+      - MAPPINGS_DIR=/app/mappings
+      - DOLPHINDB_HOST=dolphindb
+      - DOLPHINDB_PORT=8848
+      - DOLPHINDB_USER=admin
+      - DOLPHINDB_PASSWORD=${DOLPHINDB_PASSWORD:-}
+      - LOG_LEVEL=info
+      - STORAGE_HEALTH_PORT=8084
+    volumes:
+      - rdl-sock:/run/rdl
+      - rdl-wal:/var/log/raw_data/wal
+      - ./../config/config.multi.yaml:/app/config/config.multi.yaml:ro
+      - ./../mappings:/app/mappings:ro
+    ports:
+      - "8084:8084"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/live"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  publisher:
+    image: raw-data-layer
+    container_name: rdl-publisher
+    command: ["/app/publisher", "-config", "/app/config/config.multi.yaml"]
+    environment:
+      - MAPPINGS_DIR=/app/mappings
+      - ZMQ_PORT=5555
+      - WAL_DIR=/var/log/raw_data/wal
+      - LOG_LEVEL=info
+      - PUBLISHER_HEALTH_PORT=8083
+    volumes:
+      - rdl-sock:/run/rdl
+      - ./../config/config.multi.yaml:/app/config/config.multi.yaml:ro
+      - ./../mappings:/app/mappings:ro
+    ports:
+      - "8083:8083"
+      - "5555:5555"   # ZeroMQ PUB for strategies
+    depends_on:
+      storage:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/live"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+
+  canonicalizer:
+    image: raw-data-layer
+    container_name: rdl-canonicalizer
+    command: ["/app/canonicalizer", "-config", "/app/config/config.multi.yaml"]
+    environment:
+      - MAPPINGS_DIR=/app/mappings
+      - WAL_DIR=/var/log/raw_data/wal
+      - LOG_LEVEL=info
+      - CANONICALIZER_HEALTH_PORT=8082
+    volumes:
+      - rdl-sock:/run/rdl
+      - rdl-wal:/var/log/raw_data/wal
+      - ./../config/config.multi.yaml:/app/config/config.multi.yaml:ro
+      - ./../mappings:/app/mappings:ro
+    ports:
+      - "8082:8082"
+    depends_on:
+      publisher:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/live"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+
+  adapter:
+    image: raw-data-layer
+    container_name: rdl-adapter
+    command: ["/app/adapter", "-config", "/app/config/config.multi.yaml"]
+    environment:
+      - MAPPINGS_DIR=/app/mappings
+      - BINANCE_ENDPOINT=${BINANCE_ENDPOINT:-wss://stream.binance.com:9443/ws}
+      - IB_HOST=${IB_HOST:-ibgateway}
+      - IB_PORT=${IB_PORT:-7497}
+      - WAL_DIR=/var/log/raw_data/wal
+      - LOG_LEVEL=info
+      - ADAPTER_HEALTH_PORT=8081
+    volumes:
+      - rdl-sock:/run/rdl
+      - rdl-wal:/var/log/raw_data/wal
+      - ./../config/config.multi.yaml:/app/config/config.multi.yaml:ro
+      - ./../mappings:/app/mappings:ro
+    ports:
+      - "8081:8081"
+    depends_on:
+      canonicalizer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/live"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rdl-prometheus
+    volumes:
+      - ./../config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - storage
+      - publisher
+      - canonicalizer
+      - adapter
+    restart: unless-stopped
+
+volumes:
+  rdl-sock:   # shared UDS socket dir (/run/rdl) across the 4 pipeline containers
+  rdl-wal:    # durable WAL (the storage process writes here; others mount for spool)

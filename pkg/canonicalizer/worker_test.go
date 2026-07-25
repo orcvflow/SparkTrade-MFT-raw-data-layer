@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -83,6 +85,53 @@ func TestCanonicalizer_ParseBinance(t *testing.T) {
 	// Verify raw payload is preserved byte-for-byte
 	if string(canonical.RawPayload) != string(payload) {
 		t.Error("Raw payload not preserved")
+	}
+}
+
+// newTempMapper builds a SymbolMapper backed by a temp directory with the given
+// provider->canonical mapping written to binance.json. Self-contained — does
+// not depend on the repo's mappings/ directory, so it is stable for symbol
+// assertions (unlike createTestMapper, which falls back to an empty mapper if
+// ../../mappings cannot be loaded).
+func newTempMapper(t *testing.T, binanceMapping map[string]string) *mapper.SymbolMapper {
+	t.Helper()
+	dir := t.TempDir()
+	data, err := json.Marshal(binanceMapping)
+	if err != nil {
+		t.Fatalf("marshal binance mapping: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "binance.json"), data, 0644); err != nil {
+		t.Fatalf("write binance.json: %v", err)
+	}
+	m, err := mapper.NewSymbolMapper(dir)
+	if err != nil {
+		t.Fatalf("NewSymbolMapper: %v", err)
+	}
+	return m
+}
+
+// TestCanonicalizer_ParseBinance_SymbolMapped is the end-to-end regression for
+// the mapper case-mismatch bug: BinanceAdapter emits RawMessage.Source =
+// "BINANCE" (uppercase), parseBinance calls ToCanonical("BINANCE", symbol),
+// and the mapper keys tables by the lowercase filename "binance". Before the
+// normalizeSource fix this returned "UNKNOWN" for every Binance symbol — and
+// TestCanonicalizer_ParseBinance above did not assert the mapped symbol, so
+// the bug was invisible. A valid Binance trade MUST now map to the canonical
+// symbol.
+func TestCanonicalizer_ParseBinance_SymbolMapped(t *testing.T) {
+	m := newTempMapper(t, map[string]string{"BTCUSDT": "BTC/USD"})
+	c := NewCanonicalizer(m)
+
+	payload := []byte(`{"e":"trade","E":1234567890,"s":"BTCUSDT","t":12345,"p":"50000.00","q":"0.5","T":1234567890,"m":false}`)
+	raw := adapter.RawMessage{Source: "BINANCE", Payload: payload, ReceivedAt: time.Now().UnixNano()}
+
+	got, err := c.parseBinance(raw)
+	if err != nil {
+		t.Fatalf("parseBinance returned error: %v", err)
+	}
+	if got.CanonicalSymbol != "BTC/USD" {
+		t.Errorf("CanonicalSymbol = %q; want %q (uppercase source \"BINANCE\" must collapse to the binance table)",
+			got.CanonicalSymbol, "BTC/USD")
 	}
 }
 

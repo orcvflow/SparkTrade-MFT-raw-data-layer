@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"raw-data-layer/pkg/canonicalizer"
+	"raw-data-layer/pkg/health"
 )
 
 // WAL (Write-Ahead Log) provides durable storage before DolphinDB
@@ -31,6 +32,7 @@ type WAL struct {
 	currentFilePath string
 	currentSize     atomic.Int64
 	currentMessages atomic.Int64
+	rotationSeq     atomic.Uint64 // monotonic counter for unique filenames
 	
 	// State
 	running        atomic.Bool
@@ -163,13 +165,18 @@ func (w *WAL) Write(event *canonicalizer.CanonicalEvent) error {
 	w.currentSize.Add(int64(n))
 	w.currentMessages.Add(1)
 	w.totalWritten.Add(1)
+	health.WALWrites.Inc()
 	w.lastWrite.Store(time.Now())
 	
-	// Check if rotation needed
+	// Check if rotation needed — rotate synchronously (still under w.mu).
+	// Previously this was `go w.rotate()`, which raced: multiple concurrent
+	// writers each spawning a rotation goroutine, all re-opening the same
+	// second-precision filename and closing each other's freshly opened file,
+	// losing data and producing a single file with N spurious rotations.
 	if w.shouldRotate() {
-		go w.rotate() // Async rotation
+		w.rotateLocked() // sync, no new goroutine, no race
 	}
-	
+
 	return nil
 }
 
@@ -181,11 +188,18 @@ func (w *WAL) shouldRotate() bool {
 	return size >= w.maxFileSize || messages >= w.maxMessages
 }
 
-// rotate creates a new WAL file
+// rotate creates a new WAL file. Public entry point acquires the mutex.
 func (w *WAL) rotate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
+	return w.rotateLocked()
+}
+
+// rotateLocked performs rotation assuming the caller already holds w.mu.
+// The filename embeds a monotonic counter so multiple rotations within the
+// same second never collide on the same path (previously they reopened the
+// same file via O_APPEND, losing data and inflating the rotation count).
+func (w *WAL) rotateLocked() error {
 	// Close current file
 	if w.currentWriter != nil {
 		w.currentWriter.Flush()
@@ -193,18 +207,20 @@ func (w *WAL) rotate() error {
 	if w.currentFile != nil {
 		w.currentFile.Close()
 	}
-	
-	// Create new file with timestamp
-	timestamp := time.Now().Format("2006-01-02_15-04-05")
-	filename := fmt.Sprintf("wal_%s.jsonl", timestamp)
+
+	// Unique filename: compact timestamp + monotonic sequence. This replaces
+	// second-only precision, which collided for rapid rotations.
+	w.rotationSeq.Add(1)
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("wal_%s_%06d.jsonl", timestamp, w.rotationSeq.Load()%1000000)
 	filepath := filepath.Join(w.directory, filename)
-	
+
 	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		w.addError(fmt.Errorf("failed to create WAL file: %w", err))
 		return err
 	}
-	
+
 	w.currentFile = file
 	w.currentWriter = bufio.NewWriter(file)
 	w.currentFilePath = filepath
@@ -353,21 +369,29 @@ func (w *WAL) Stats() WALStats {
 	errors := make([]error, len(w.errors))
 	copy(errors, w.errors)
 	w.errorsMu.RUnlock()
-	
+
 	lastWrite := time.Time{}
 	if v := w.lastWrite.Load(); v != nil {
 		lastWrite = v.(time.Time)
 	}
-	
+
+	// currentFilePath is written under w.mu in rotateLocked(); read it under the
+	// same mutex so a concurrent rotation (rotationChecker tick or Write's
+	// shouldRotate→rotateLocked) can't race with Stats. The atomic fields are
+	// already safe; currentFilePath is the one plain field.
+	w.mu.Lock()
+	currentFile := w.currentFilePath
+	w.mu.Unlock()
+
 	return WALStats{
-		Running:        w.running.Load(),
-		CurrentFile:    w.currentFilePath,
-		CurrentSize:    w.currentSize.Load(),
-		CurrentMessages: w.currentMessages.Load(),
-		TotalWritten:   w.totalWritten.Load(),
-		TotalRotations: w.totalRotations.Load(),
-		LastWrite:      lastWrite,
-		Errors:         errors,
+		Running:          w.running.Load(),
+		CurrentFile:      currentFile,
+		CurrentSize:      w.currentSize.Load(),
+		CurrentMessages:  w.currentMessages.Load(),
+		TotalWritten:     w.totalWritten.Load(),
+		TotalRotations:   w.totalRotations.Load(),
+		LastWrite:         lastWrite,
+		Errors:            errors,
 	}
 }
 

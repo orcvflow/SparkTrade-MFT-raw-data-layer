@@ -1,0 +1,37 @@
+# Raw Data Layer — Storage process (Addım C, health on :8084).
+#
+# Binds the publisher→storage UDS server. Writes every canonical event to the WAL
+# synchronously (the lossless guarantee) and batches into DolphinDB over its HTTP
+# REST API (best-effort; on DB timeout the WAL holds everything and is replayed on
+# recovery). This process is the durable sink of the pipeline.
+[Unit]
+Description=Raw Data Layer — Storage Process
+Documentation=https://github.com/yourusername/raw-data-layer
+After=network.target
+
+[Service]
+Type=simple
+User=quant
+Group=quant
+WorkingDirectory=/opt/raw-data-layer
+ExecStart=/opt/raw-data-layer/storage -config /opt/raw-data-layer/config/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# DolphinDB creds — prefer a systemd credential or EnvironmentFile in production;
+# the defaults below mirror config.yaml for the MVP. NEVER commit real secrets.
+Environment="DOLPHINDB_HOST=localhost"
+Environment="DOLPHINDB_PORT=8848"
+Environment="DOLPHINDB_USER=admin"
+Environment="DOLPHINDB_PASSWORD=123456"
+Environment="WAL_DIR=/var/log/raw_data/wal"
+Environment="LOG_LEVEL=info"
+Environment="STORAGE_HEALTH_PORT=8084"
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=raw-data-storage
+
+[Install]
+WantedBy=multi-user.target

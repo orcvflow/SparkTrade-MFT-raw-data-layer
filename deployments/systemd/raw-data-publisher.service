@@ -1,0 +1,35 @@
+# Raw Data Layer — Publisher process (Addım C, health on :8083).
+#
+# Binds the canonicalizer→publisher UDS server. For each canonical event it
+# broadcasts to strategies via ZeroMQ PUB (best-effort, topic = canonical symbol)
+# and forwards the exact received bytes to storage over a lossless UDS client
+# (byte-for-byte integrity, no re-encode). Never loses data (forward spool to
+# storage on outage); a slow ZMQ consumer never crashes the process.
+[Unit]
+Description=Raw Data Layer — Publisher Process
+Documentation=https://github.com/yourusername/raw-data-layer
+After=network.target
+Requires=raw-data-storage.service
+After=raw-data-storage.service
+
+[Service]
+Type=simple
+User=quant
+Group=quant
+WorkingDirectory=/opt/raw-data-layer
+ExecStart=/opt/raw-data-layer/publisher -config /opt/raw-data-layer/config/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+Environment="ZMQ_PORT=5555"
+Environment="WAL_DIR=/var/log/raw_data/wal"
+Environment="LOG_LEVEL=info"
+Environment="PUBLISHER_HEALTH_PORT=8083"
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=raw-data-publisher
+
+[Install]
+WantedBy=multi-user.target

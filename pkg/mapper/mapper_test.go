@@ -3,6 +3,7 @@ package mapper
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -59,11 +60,49 @@ func TestSymbolMapper_ToCanonical(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := m.ToCanonical(tt.source, tt.symbol)
 			if result != tt.expected {
-				t.Errorf("ToCanonical(%s, %s) = %s; want %s", 
+				t.Errorf("ToCanonical(%s, %s) = %s; want %s",
 					tt.source, tt.symbol, result, tt.expected)
 			}
 		})
 	}
+}
+
+// TestSymbolMapper_SourceCaseInsensitive is the regression test for the
+// pre-existing Addım A/B case-mismatch bug: the mapper keys tables by the
+// lowercase JSON filename ("binance") while adapters emit uppercase source
+// identifiers on RawMessage.Source (BinanceAdapter sets "BINANCE"). Before
+// normalizeSource, ToCanonical("BINANCE", "BTCUSDT") returned "UNKNOWN" for
+// every Binance symbol. Every spelling must now collapse to the same table.
+func TestSymbolMapper_SourceCaseInsensitive(t *testing.T) {
+	m := setupTestMapper(t)
+
+	cases := []string{"BINANCE", "Binance", "binance", "BiNaNcE", "IB", "Ib", "ib"}
+	for _, src := range cases {
+		got := m.ToCanonical(src, "BTCUSDT")
+		// "BTCUSDT" only exists in the binance table; ib has "265598"->"AAPL".
+		want := "BTC/USD"
+		// For ib-spelled sources, BTCUSDT is not a known provider symbol there,
+		// so only assert for binance-spelled sources. Keep this test focused on
+		// the case-collapse property: any casing of "binance" must resolve.
+		if isBinanceSpelling(src) && got != want {
+			t.Errorf("ToCanonical(%q, BTCUSDT) = %q; want %q (source case should collapse)", src, got, want)
+		}
+	}
+
+	// IB reverse: any casing of "ib" must reverse-map AAPL -> "265598".
+	for _, src := range []string{"IB", "Ib", "ib", "iB"} {
+		if got := m.ToProvider(src, "AAPL"); got != "265598" {
+			t.Errorf("ToProvider(%q, AAPL) = %q; want 265598 (source case should collapse)", src, got)
+		}
+		if !m.IsKnown(src, "265598") {
+			t.Errorf("IsKnown(%q, 265598) = false; want true (source case should collapse)", src)
+		}
+	}
+}
+
+// isBinanceSpelling reports whether src lowercases to "binance".
+func isBinanceSpelling(src string) bool {
+	return strings.EqualFold(src, "binance")
 }
 
 func TestSymbolMapper_ToProvider(t *testing.T) {

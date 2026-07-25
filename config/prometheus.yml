@@ -1,0 +1,35 @@
+# Prometheus scrape config for the Raw Data Layer multi-process deployment
+# (Addım C). Each of the 4 processes exposes /metrics on its own port (8081-8084),
+# registered by pkg/health/metrics.go. Run alongside docker-compose.multi.yml
+# (the `prometheus` service mounts this file).
+#
+# Metrics exposed (pkg/health/metrics.go):
+#   raw_data_messages_received_total{source}
+#   raw_data_adapter_latency_microseconds{source}
+#   raw_data_queue_depth
+#   raw_data_backpressure_total
+#   (plus DolphinDB write counters on the storage process)
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: raw-data-layer
+
+scrape_configs:
+  - job_name: raw-data-layer
+    metrics_path: /metrics
+    static_configs:
+      # Service names resolve within the compose network when Prometheus runs as
+      # the `prometheus` service in docker-compose.multi.yml. For an external
+      # Prometheus, use the host:port mapping (localhost:8081..8084).
+      - targets:
+          - adapter:8081
+          - canonicalizer:8082
+          - publisher:8083
+          - storage:8084
+    relabel_configs:
+      - source_labels: ['__address__']
+        target_label: process
+        regex: '([a-z]+):\d+'
+        replacement: '$1'

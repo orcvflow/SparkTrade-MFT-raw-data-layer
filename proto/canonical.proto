@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package canonical;
 
-option go_package = "github.com/yourusername/raw-data-layer/proto/gen;gen";
+option go_package = "raw-data-layer/proto/gen;gen";
 
 // CanonicalEvent represents a normalized market data event
 // Supports multi-asset: Forex, Futures, Crypto, Equities

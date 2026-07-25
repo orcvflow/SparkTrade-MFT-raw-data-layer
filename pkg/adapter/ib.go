@@ -91,8 +91,9 @@ func (ib *IBAdapter) Connect(ctx context.Context) error {
 	
 	ib.mu.Lock()
 	ib.conn = conn
+	ib.startTime = time.Now()
 	ib.mu.Unlock()
-	
+
 	// Send handshake
 	if err := ib.sendHandshake(); err != nil {
 		conn.Close()
@@ -101,7 +102,6 @@ func (ib *IBAdapter) Connect(ctx context.Context) error {
 	}
 	
 	ib.connected.Store(true)
-	ib.startTime = time.Now()
 	
 	// Subscribe to symbols
 	if err := ib.subscribeSymbols(); err != nil {
@@ -226,12 +226,17 @@ func (ib *IBAdapter) receiveLoop(ctx context.Context, output chan<- RawMessage) 
 			}
 			
 			if msg != nil {
+				// Increment BEFORE the send: the output channel is buffered, so a
+				// consumer that receives from it and then reads messagesRecv must
+				// already see the increment (logical race otherwise).
+				ib.messagesRecv.Add(1)
+				ib.lastMessage.Store(time.Now())
+
 				// Send to output channel with timeout
 				select {
 				case output <- *msg:
-					ib.messagesRecv.Add(1)
-					ib.lastMessage.Store(time.Now())
 				case <-time.After(1 * time.Second):
+					ib.messagesRecv.Add(^uint64(0)) // -1: undo the pre-increment (undelivered)
 					ib.addError(fmt.Errorf("output channel blocked"))
 				}
 			}
@@ -340,20 +345,21 @@ func (ib *IBAdapter) Health() HealthStatus {
 	ib.mu.RLock()
 	errors := make([]error, len(ib.errors))
 	copy(errors, ib.errors)
+	startTime := ib.startTime
 	ib.mu.RUnlock()
-	
+
 	lastMsg := time.Time{}
 	if v := ib.lastMessage.Load(); v != nil {
 		lastMsg = v.(time.Time)
 	}
-	
+
 	return HealthStatus{
 		Connected:      ib.connected.Load(),
 		LastMessage:    lastMsg,
 		MessagesRecv:   ib.messagesRecv.Load(),
 		Errors:         errors,
 		ReconnectCount: int(ib.reconnectCount.Load()),
-		Uptime:         time.Since(ib.startTime),
+		Uptime:         time.Since(startTime),
 	}
 }
 

@@ -1,0 +1,133 @@
+# Raw Data Layer — Multi-Process Docker config (Addım C).
+#
+# Used by docker/docker-compose.multi.yml. Differs from config.yaml in:
+#   - ipc socket paths under /run/rdl (a shared volume across the 4 containers,
+#     so UDS works across process boundaries);
+#   - adapters disabled by default (a containerized adapter should be pointed at a
+#     testnet/mock via env, never the real exchange out of the box);
+#   - DolphinDB disabled (WAL-only durable sink; enable + set creds via env when a
+#     DolphinDB service is present);
+#   - NO secrets are embedded (DolphinDB password left empty).
+#
+# Everything here is also env-overridable where pkg/config supports it
+# (MAPPINGS_DIR, DOLPHINDB_*, ZMQ_PORT, *_HEALTH_PORT, WAL_DIR, LOG_LEVEL).
+
+adapters:
+  binance:
+    enabled: false  # set BINANCE_ENDPOINT + enable via env when needed
+    endpoint: "wss://stream.binance.com:9443/ws"
+    symbols: ["btcusdt", "ethusdt"]
+    reconnect:
+      max_attempts: 10
+      backoff_seconds: [1, 2, 4, 8, 16, 30]
+    heartbeat_interval: "30s"
+    session_rotation: "24h"
+  ib:
+    enabled: false
+    host: "ibgateway"
+    port: 7497
+    client_id: 1
+    symbols: ["AAPL", "MSFT"]
+    reconnect:
+      max_attempts: 10
+      backoff_seconds: [1, 2, 4, 8, 16, 30]
+    request_timeout: "10s"
+
+worker_pool:
+  workers: 50
+  queue_size: 10000
+  autoscale:
+    enabled: true
+    high_water_mark: 0.8
+    low_water_mark: 0.2
+    max_workers: 100
+    min_workers: 25
+
+publisher:
+  zeromq:
+    enabled: true
+    protocol: "tcp"
+    bind_address: "*"
+    port: 5555
+    heartbeat_interval: "5s"
+    hwm: 10000
+
+storage:
+  wal:
+    enabled: true
+    directory: "/var/log/raw_data/wal"
+    rotation_size: 104857600
+    rotation_count: 10000
+    sync_interval: "1s"
+  dolphindb:
+    enabled: false
+    host: "dolphindb"
+    port: 8848
+    username: "admin"
+    password: ""
+    database: "dfs://raw_data"
+    batch_size: 1000
+    batch_timeout: "1s"
+    connection_pool:
+      max_open: 10
+      max_idle: 5
+      max_lifetime: "1h"
+
+validation:
+  enabled: true
+  layers:
+    connectivity: true
+    protocol: true
+    data_integrity: true
+    fault_tolerance: true
+    performance: true
+
+health:
+  http_port: 8080
+  metrics_port: 9090
+  readiness_path: "/ready"
+  liveness_path: "/live"
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+axiom:
+  sanitization:
+    enabled: true
+    overflow_threshold: 1e15
+    price_clamp:
+      enabled: false
+      min: 0.0001
+      max: 1e9
+  statistics:
+    moving_average_window: 100
+    percentile_tracker_size: 1000
+    stddev_window: 100
+  performance:
+    batch_sanitize: true
+    parallel_workers: 8
+
+performance:
+  adapter_latency_p50_us: 500
+  adapter_latency_p99_us: 5000
+  throughput_msg_per_sec: 100000
+  queue_depth_warning: 8000
+  memory_limit_mb: 2000
+
+# ─── Multi-process topology (Addım C) ───────────────────────────────────────
+# UDS sockets under /run/rdl — a SHARED volume in docker-compose.multi.yml so
+# the 4 containers can talk over UDS across process boundaries.
+ipc:
+  adapter_to_canonicalizer: "/run/rdl/raw-adapter-canonicalizer.sock"
+  canonicalizer_to_publisher: "/run/rdl/raw-canonicalizer-publisher.sock"
+  publisher_to_storage: "/run/rdl/raw-publisher-storage.sock"
+
+processes:
+  adapter_health_port: 8081
+  canonicalizer_health_port: 8082
+  publisher_health_port: 8083
+  storage_health_port: 8084
+
+mappings_dir: "/app/mappings"

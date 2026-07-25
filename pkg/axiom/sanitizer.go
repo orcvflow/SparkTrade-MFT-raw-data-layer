@@ -15,10 +15,15 @@ func NewMathSanitizer() *MathSanitizer {
 	return &MathSanitizer{}
 }
 
-// SanitizePrice ensures price is valid, non-negative, finite
-// Returns 0.0 for NaN, Inf, or negative values
+// SanitizePrice ensures price is valid, non-negative, finite, and within realistic bounds
+// Returns 0.0 for NaN, Inf, negative values, or overflow (> 1e15)
 func (s *MathSanitizer) SanitizePrice(price float64) float64 {
 	if math.IsNaN(price) || math.IsInf(price, 0) || price < 0 {
+		return 0.0
+	}
+	// Flag astronomically large values as overflow (1e308, etc.)
+	// Realistic price limit: 1e15 covers all real-world assets
+	if s.DetectOverflow(price) {
 		return 0.0
 	}
 	return price

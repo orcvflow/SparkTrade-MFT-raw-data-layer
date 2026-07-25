@@ -1,0 +1,41 @@
+# Raw Data Layer — Adapter process (Addım C, health on :8081).
+#
+# Runs the market-data adapters (Binance / IB) and forwards raw messages to the
+# canonicalizer over UDS+Protobuf. The IPC client is lossless (on-disk spool), so
+# a canonicalizer outage never loses data. Restart=always mirrors pkg/process and
+# the Homalos isolation contract: one crash is isolated, systemd brings it back.
+#
+# Install: sudo cp deployments/systemd/raw-data-*.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable --now raw-data-adapter raw-data-canonicalizer raw-data-publisher raw-data-storage
+[Unit]
+Description=Raw Data Layer — Adapter Process
+Documentation=https://github.com/yourusername/raw-data-layer
+After=network.target
+Requires=raw-data-canonicalizer.service
+After=raw-data-canonicalizer.service
+
+[Service]
+Type=simple
+User=quant
+Group=quant
+WorkingDirectory=/opt/raw-data-layer
+ExecStart=/opt/raw-data-layer/adapter -config /opt/raw-data-layer/config/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Environment (override via `systemctl edit` or a drop-in; secrets via creds file)
+Environment="MAPPINGS_DIR=/opt/raw-data-layer/mappings"
+Environment="DOLPHINDB_HOST=localhost"
+Environment="DOLPHINDB_PORT=8848"
+Environment="WAL_DIR=/var/log/raw_data/wal"
+Environment="LOG_LEVEL=info"
+Environment="ADAPTER_HEALTH_PORT=8081"
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=raw-data-adapter
+
+[Install]
+WantedBy=multi-user.target

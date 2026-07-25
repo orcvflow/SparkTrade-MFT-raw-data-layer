@@ -125,3 +125,20 @@ performance:
   throughput_msg_per_sec: 100000  # > 100K msg/s
   queue_depth_warning: 8000     # Alert if > 8000
   memory_limit_mb: 2000         # Alert if > 2GB
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Process Split (Addım C — Homalos pattern)
+# Each process is a separate binary with its own health port; they communicate
+# over UDS+Protobuf. These paths/ports are the multi-process topology. Override
+# any of them via env (ADAPTER_HEALTH_PORT, DOLPHINDB_HOST, …) — see pkg/config.
+# ─────────────────────────────────────────────────────────────────────────────
+ipc:
+  adapter_to_canonicalizer: "/tmp/raw-adapter-canonicalizer.sock"
+  canonicalizer_to_publisher: "/tmp/raw-canonicalizer-publisher.sock"
+  publisher_to_storage: "/tmp/raw-publisher-storage.sock"
+
+processes:
+  adapter_health_port: 8081       # cmd/adapter
+  canonicalizer_health_port: 8082 # cmd/canonicalizer
+  publisher_health_port: 8083     # cmd/publisher
+  storage_health_port: 8084       # cmd/storage

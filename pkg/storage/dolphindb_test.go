@@ -136,8 +136,11 @@ func TestDolphinDBWriter_Write_NilEvent(t *testing.T) {
 func TestDolphinDBWriter_Write_Single(t *testing.T) {
 	writer, wal := createTestDolphinDBWriter(t)
 	defer wal.Stop()
-	writer.Start()
-	defer writer.Stop()
+	// NOTE: Start() is intentionally omitted. We test batch accumulation in
+	// isolation here; starting the flushLoop would race the 100ms timeout
+	// ticker against the synchronous WAL fsync in Write(), draining the batch
+	// non-deterministically. Timeout/flush behaviour is covered by
+	// TestDolphinDBWriter_TimeoutFlush_WALFallback.
 
 	event := createTestCanonicalEvent("evt_single_001")
 
@@ -145,13 +148,19 @@ func TestDolphinDBWriter_Write_Single(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	// Event should be in batch (not yet flushed)
+	// Event should be in batch (no flush loop running to drain it)
 	writer.batchMu.Lock()
 	batchLen := len(writer.batch)
 	writer.batchMu.Unlock()
 
 	if batchLen != 1 {
 		t.Errorf("Expected 1 event in batch, got %d", batchLen)
+	}
+
+	// Lossless guarantee: event also landed in WAL synchronously
+	walStats := wal.Stats()
+	if walStats.TotalWritten < 1 {
+		t.Errorf("Expected event in WAL (lossless), got %d", walStats.TotalWritten)
 	}
 }
 
@@ -164,8 +173,9 @@ func TestDolphinDBWriter_BatchAccumulation(t *testing.T) {
 	// Use larger batch size to test accumulation
 	writer.batchSize = 5
 	writer.batch = make([]*canonicalizer.CanonicalEvent, 0, 5)
-	writer.Start()
-	defer writer.Stop()
+	// See TestDolphinDBWriter_Write_Single: Start() omitted to isolate batch
+	// accumulation from the flushLoop's 100ms timeout ticker racing the sync
+	// WAL fsync.
 
 	// Write 4 events — should stay in batch
 	for i := 0; i < 4; i++ {
@@ -179,6 +189,12 @@ func TestDolphinDBWriter_BatchAccumulation(t *testing.T) {
 
 	if batchLen != 4 {
 		t.Errorf("Expected 4 events in batch, got %d", batchLen)
+	}
+
+	// All 4 events must also be durably in WAL (lossless, never lose data)
+	walStats := wal.Stats()
+	if walStats.TotalWritten < 4 {
+		t.Errorf("Expected 4 events in WAL (lossless), got %d", walStats.TotalWritten)
 	}
 }
 

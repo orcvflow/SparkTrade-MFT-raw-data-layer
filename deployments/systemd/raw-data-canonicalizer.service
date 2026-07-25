@@ -1,0 +1,35 @@
+# Raw Data Layer — Canonicalizer process (Addım C, health on :8082).
+#
+# Binds the adapter→canonicalizer UDS server, runs the bounded worker pool with
+# the canonicalizer Process callback (parse → sanitize → map symbol → build
+# CanonicalEvent, raw_payload preserved byte-for-byte), and forwards canonical
+# events to the publisher over a lossless UDS client. Never panics, never loses
+# data (spool to publisher on outage), bounded pool with backpressure.
+[Unit]
+Description=Raw Data Layer — Canonicalizer Process
+Documentation=https://github.com/yourusername/raw-data-layer
+After=network.target
+Requires=raw-data-publisher.service
+After=raw-data-publisher.service
+
+[Service]
+Type=simple
+User=quant
+Group=quant
+WorkingDirectory=/opt/raw-data-layer
+ExecStart=/opt/raw-data-layer/canonicalizer -config /opt/raw-data-layer/config/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+Environment="MAPPINGS_DIR=/opt/raw-data-layer/mappings"
+Environment="WAL_DIR=/var/log/raw_data/wal"
+Environment="LOG_LEVEL=info"
+Environment="CANONICALIZER_HEALTH_PORT=8082"
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=raw-data-canonicalizer
+
+[Install]
+WantedBy=multi-user.target

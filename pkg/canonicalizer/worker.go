@@ -71,13 +71,17 @@ func (c *Canonicalizer) Process(ctx context.Context, raw adapter.RawMessage) (wo
 		}
 	}
 	
-	// Use canonical variable to avoid compile error
+	// Carry the built canonical event downstream. Even on parse error a
+	// best-effort event with the raw payload preserved is attached, so the
+	// pipeline never loses data.
+	var canonicalAny any
 	if canonical != nil {
-		_ = canonical // Silence unused variable warning
+		canonicalAny = canonical
 	}
-	
+
 	return workerpool.ProcessedMessage{
 		Raw:         raw,
+		Canonical:   canonicalAny,
 		Error:       err,
 		ProcessedAt: time.Now().UnixNano(),
 	}, err

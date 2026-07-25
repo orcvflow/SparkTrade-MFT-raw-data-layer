@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"raw-data-layer/pkg/health"
 )
 
 // BinanceAdapter implements Adapter for Binance WebSocket
@@ -75,10 +77,11 @@ func (b *BinanceAdapter) Connect(ctx context.Context) error {
 		return nil
 	}
 	
-	// Connect with timeout
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
-	
+	// Connect with timeout. Use a local dialer — websocket.DefaultDialer is a
+	// shared package variable and mutating it races with concurrent Connect
+	// calls (e.g. receiveLoop's reconnect).
+	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+
 	conn, _, err := dialer.DialContext(ctx, b.endpoint, nil)
 	if err != nil {
 		return NewAdapterError(ErrorConnection, "BINANCE", "failed to connect", err)
@@ -86,10 +89,10 @@ func (b *BinanceAdapter) Connect(ctx context.Context) error {
 	
 	b.mu.Lock()
 	b.conn = conn
-	b.mu.Unlock()
-	
-	b.connected.Store(true)
 	b.startTime = time.Now()
+	b.mu.Unlock()
+
+	b.connected.Store(true)
 	
 	// Subscribe to symbols
 	if err := b.subscribe(); err != nil {
@@ -179,12 +182,19 @@ func (b *BinanceAdapter) receiveLoop(ctx context.Context, output chan<- RawMessa
 			}
 			
 			if msg != nil {
+				// Increment BEFORE the send: the output channel is buffered, so a
+				// consumer that receives from it and then reads Stats()/messagesRecv
+				// must already see the increment (otherwise a logical race: send →
+				// consumer reads → worker finally increments).
+				b.messagesRecv.Add(1)
+				health.MessagesReceived.WithLabelValues("BINANCE").Inc()
+				b.lastMessage.Store(time.Now())
+
 				// Send to output channel with timeout
 				select {
 				case output <- *msg:
-					b.messagesRecv.Add(1)
-					b.lastMessage.Store(time.Now())
 				case <-time.After(1 * time.Second):
+					b.messagesRecv.Add(^uint64(0)) // -1: undo the pre-increment (undelivered)
 					b.addError(fmt.Errorf("output channel blocked"))
 				}
 			}
@@ -336,20 +346,21 @@ func (b *BinanceAdapter) Health() HealthStatus {
 	b.mu.RLock()
 	errors := make([]error, len(b.errors))
 	copy(errors, b.errors)
+	startTime := b.startTime
 	b.mu.RUnlock()
-	
+
 	lastMsg := time.Time{}
 	if v := b.lastMessage.Load(); v != nil {
 		lastMsg = v.(time.Time)
 	}
-	
+
 	return HealthStatus{
 		Connected:      b.connected.Load(),
 		LastMessage:    lastMsg,
 		MessagesRecv:   b.messagesRecv.Load(),
 		Errors:         errors,
 		ReconnectCount: int(b.reconnectCount.Load()),
-		Uptime:         time.Since(b.startTime),
+		Uptime:         time.Since(startTime),
 	}
 }
 

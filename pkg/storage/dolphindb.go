@@ -1,41 +1,61 @@
 package storage
 
-// DolphinDB Batch Writer
-// Evidence: DolphinDB vs pickle — 10x faster read speed, 4:1 to 10:1 compression
-// Batch: 1000 messages or 1 second timeout
-// Two tables: raw_events (BLOB), canonical_events (structured)
-// On timeout: persist to WAL, retry on recovery
-// Rules: Never panic, never lose data, bounded queues
+// DolphinDB Batch Writer — HTTP REST API implementation
+//
+// Evidence: DolphinDB exposes an HTTP REST endpoint (POST /run, body = script).
+// The official Go API (github.com/dolphindb/api-go) is NOT a database/sql driver
+// (see https://go.dev/wiki/SQLDrivers — no dolphindb entry), so the previous
+// database/sql approach could never bind a driver and never actually connected.
+// This implementation talks to DolphinDB over its real, documented HTTP REST API:
+//   POST http://host:port/run?user=...&password=...  body: "<DolphinDB script>"
+//   200 OK ⇒ success.  Script uses loadTable() + tableInsert() (see
+//   https://docs.dolphindb.com/en/javadoc/data_writing/ddb_writing_methods.html).
+//
+// Lossless design (never lose data) — preserved from the prior version:
+//  1. Every event is written to WAL synchronously on arrival.
+//  2. The event is also appended to the in-memory batch for a DB write.
+//  3. flush() writes the batch to DolphinDB when connected; if the DB is down
+//     or the write fails, nothing is lost — WAL already holds the event
+//     (flush does NOT re-write to WAL, avoiding duplicates).
+//  4. Connect() replays the WAL on startup; reconnectLoop() replays on recovery.
+//
+// Rules: Never panic, never lose data, bounded queues.
 
 import (
+	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"raw-data-layer/pkg/canonicalizer"
-
-	// _ "github.com/dolphindb/go-api" // Uncomment when DolphinDB Go driver is available
+	"raw-data-layer/pkg/health"
 )
 
-// DolphinDBWriter writes canonical events to DolphinDB in batches
-// Fallback: if DB unavailable, events go to WAL
+// DolphinDBWriter writes canonical events to DolphinDB over HTTP REST in batches.
+// Fallback: if DB unavailable, events are safe in WAL.
 type DolphinDBWriter struct {
 	// Connection config
 	host     string
 	port     int
 	username string
 	password string
-	database string
+	database string // DolphinDB DFS path, e.g. "dfs://raw_data"
+
+	// HTTP
+	baseURL    string
+	httpClient *http.Client
 
 	// Batch config
 	batchSize    int
 	batchTimeout time.Duration
 
 	// Internal state
-	db        *sql.DB
 	batch     []*canonicalizer.CanonicalEvent
 	batchMu   sync.Mutex
 	connected atomic.Bool
@@ -44,11 +64,11 @@ type DolphinDBWriter struct {
 	wal *WAL
 
 	// Stats
-	totalWritten   atomic.Uint64
-	totalFailed    atomic.Uint64
-	totalBatches   atomic.Uint64
-	lastWriteTime  atomic.Value // time.Time
-	lastErrorTime  atomic.Value // time.Time
+	totalWritten  atomic.Uint64
+	totalFailed   atomic.Uint64
+	totalBatches  atomic.Uint64
+	lastWriteTime atomic.Value // time.Time
+	lastErrorTime atomic.Value // time.Time
 
 	// Lifecycle
 	ctx    context.Context
@@ -66,7 +86,7 @@ type DolphinDBConfig struct {
 	Port         int
 	Username     string
 	Password     string
-	Database     string
+	Database     string // DFS path, e.g. "dfs://raw_data"
 	BatchSize    int
 	BatchTimeout time.Duration
 }
@@ -78,16 +98,20 @@ func DefaultDolphinDBConfig() DolphinDBConfig {
 		Port:         8848,
 		Username:     "admin",
 		Password:     "123456",
-		Database:     "raw_data",
+		Database:     "dfs://raw_data",
 		BatchSize:    1000,
 		BatchTimeout: 1 * time.Second,
 	}
 }
 
-// NewDolphinDBWriter creates a new DolphinDB batch writer
-// wal parameter is optional (nil = no WAL fallback)
+// NewDolphinDBWriter creates a new DolphinDB batch writer.
+// wal parameter is optional (nil = no WAL fallback).
 func NewDolphinDBWriter(config DolphinDBConfig, wal *WAL) *DolphinDBWriter {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	if config.Database == "" {
+		config.Database = "dfs://raw_data"
+	}
 
 	return &DolphinDBWriter{
 		host:         config.Host,
@@ -95,6 +119,8 @@ func NewDolphinDBWriter(config DolphinDBConfig, wal *WAL) *DolphinDBWriter {
 		username:     config.Username,
 		password:     config.Password,
 		database:     config.Database,
+		baseURL:      fmt.Sprintf("http://%s:%d", config.Host, config.Port),
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
 		batchSize:    config.BatchSize,
 		batchTimeout: config.BatchTimeout,
 		batch:        make([]*canonicalizer.CanonicalEvent, 0, config.BatchSize),
@@ -105,8 +131,11 @@ func NewDolphinDBWriter(config DolphinDBConfig, wal *WAL) *DolphinDBWriter {
 	}
 }
 
-// Connect establishes connection to DolphinDB
-// Returns error if connection fails — caller decides whether to continue with WAL-only mode
+// Connect establishes a connection to DolphinDB by running a trivial script
+// (1+1) over the HTTP REST API. On success it marks the writer connected and
+// replays any WAL events that accumulated while the DB was unavailable.
+// Returns error if the connection fails — caller decides whether to continue
+// with WAL-only mode.
 func (w *DolphinDBWriter) Connect() error {
 	// Never panic
 	defer func() {
@@ -115,39 +144,29 @@ func (w *DolphinDBWriter) Connect() error {
 		}
 	}()
 
-	// DolphinDB uses its own protocol; for MVP we use database/sql with a DSN-style
-	// connection string. In production, use the official DolphinDB Go API.
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s",
-		w.username, w.password, w.host, w.port, w.database)
-
-	db, err := sql.Open("dolphindb", dsn)
-	if err != nil {
-		w.addError(fmt.Errorf("sql.Open failed: %w", err))
-		return fmt.Errorf("failed to open DolphinDB connection: %w", err)
+	if err := w.runScript("1+1"); err != nil {
+		w.addError(fmt.Errorf("connect ping failed: %w", err))
+		return fmt.Errorf("DolphinDB connect failed: %w", err)
 	}
 
-	// Ping to verify connection
-	pingCtx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
-	defer cancel()
-
-	if err := db.PingContext(pingCtx); err != nil {
-		db.Close()
-		w.addError(fmt.Errorf("ping failed: %w", err))
-		return fmt.Errorf("DolphinDB ping failed: %w", err)
-	}
-
-	// Connection pool settings
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
-	w.db = db
 	w.connected.Store(true)
+
+	// Ensure tables exist before replaying into them.
+	if err := w.ensureTables(); err != nil {
+		// Non-fatal: continue with WAL-only mode for writes; replay will retry.
+		w.addError(fmt.Errorf("ensureTables warning: %w", err))
+	}
+
+	// Replay WAL on startup so events accumulated while the DB was down are
+	// not lost. This runs synchronously — Connect() does not return until the
+	// backlog is drained (best-effort: failed batches stay in WAL).
+	w.replayWAL()
 
 	return nil
 }
 
-// Start begins the batch writer background flush loop
+// Start begins the batch writer background flush loop. If not connected, it
+// also starts the reconnect loop.
 func (w *DolphinDBWriter) Start() error {
 	// Never panic
 	defer func() {
@@ -155,14 +174,6 @@ func (w *DolphinDBWriter) Start() error {
 			w.addError(fmt.Errorf("panic in Start: %v", r))
 		}
 	}()
-
-	if w.connected.Load() {
-		// Ensure tables exist
-		if err := w.ensureTables(); err != nil {
-			// Non-fatal: continue with WAL-only mode
-			w.addError(fmt.Errorf("ensureTables warning: %w", err))
-		}
-	}
 
 	// Start batch flush ticker
 	w.wg.Add(1)
@@ -177,8 +188,7 @@ func (w *DolphinDBWriter) Start() error {
 	return nil
 }
 
-// Write queues a canonical event for batch writing
-// Thread-safe; never blocks; falls back to WAL on batch failure
+// Write queues a canonical event for batch writing. Thread-safe; never blocks.
 func (w *DolphinDBWriter) Write(event *canonicalizer.CanonicalEvent) error {
 	// Never panic
 	defer func() {
@@ -191,6 +201,15 @@ func (w *DolphinDBWriter) Write(event *canonicalizer.CanonicalEvent) error {
 		return fmt.Errorf("nil event")
 	}
 
+	// CRITICAL: ALWAYS write to WAL first (sync, lossless guarantee).
+	if w.wal != nil {
+		if err := w.wal.Write(event); err != nil {
+			w.addError(fmt.Errorf("WAL write failed for %s: %w", event.EventID, err))
+			return fmt.Errorf("wal write failed: %w", err)
+		}
+	}
+
+	// Append to batch regardless of connection state.
 	w.batchMu.Lock()
 	w.batch = append(w.batch, event)
 	batchLen := len(w.batch)
@@ -198,7 +217,7 @@ func (w *DolphinDBWriter) Write(event *canonicalizer.CanonicalEvent) error {
 
 	// Trigger flush if batch is full
 	if batchLen >= w.batchSize {
-		go w.flush() // async flush — never block the caller
+		go w.flush() // async flush — safe because WAL already has the event
 	}
 
 	return nil
@@ -228,7 +247,10 @@ func (w *DolphinDBWriter) flushLoop() {
 	}
 }
 
-// flush drains the current batch and writes to DolphinDB or WAL
+// flush drains the current batch and writes to DolphinDB. Every event in the
+// batch was already written to WAL synchronously in Write(), so on any failure
+// path we do NOT re-write to WAL — that would only create duplicates. WAL
+// remains the durable source of truth; DolphinDB is a best-effort fast path.
 func (w *DolphinDBWriter) flush() {
 	// Never panic
 	defer func() {
@@ -245,191 +267,174 @@ func (w *DolphinDBWriter) flush() {
 	}
 	toWrite := make([]*canonicalizer.CanonicalEvent, len(w.batch))
 	copy(toWrite, w.batch)
-	w.batch = w.batch[:0] // reset without reallocation
+	w.batch = w.batch[:0]
 	w.batchMu.Unlock()
 
-	// Attempt DolphinDB write
 	if w.connected.Load() {
 		if err := w.writeBatch(toWrite); err != nil {
 			w.addError(fmt.Errorf("writeBatch failed: %w", err))
 			w.totalFailed.Add(uint64(len(toWrite)))
+			health.DolphinDBWriteErrors.Add(float64(len(toWrite)))
 			w.lastErrorTime.Store(time.Now())
-
-			// Fallback: write to WAL
-			w.writeToWAL(toWrite)
+			// Events are safe in WAL (written in Write()) — no re-write needed.
 			return
 		}
-	} else {
-		// DB not connected — write to WAL
-		w.writeToWAL(toWrite)
-		return
 	}
+	// When not connected: batch is drained, events live in WAL. Nothing to do.
 
 	w.totalWritten.Add(uint64(len(toWrite)))
 	w.totalBatches.Add(1)
+	health.DolphinDBWrites.Add(float64(len(toWrite)))
 	w.lastWriteTime.Store(time.Now())
 }
 
-// writeBatch writes a batch to DolphinDB (both tables)
+// writeBatch writes a batch to DolphinDB (both tables) over HTTP REST.
 func (w *DolphinDBWriter) writeBatch(events []*canonicalizer.CanonicalEvent) error {
-	if w.db == nil {
-		return fmt.Errorf("database connection is nil")
+	script := w.buildInsertScript(events)
+	if script == "" {
+		return nil
+	}
+	if err := w.runScript(script); err != nil {
+		return fmt.Errorf("http write: %w", err)
+	}
+	return nil
+}
+
+// buildInsertScript builds a DolphinDB script that bulk-inserts the batch into
+// both raw_events and canonical_events via tableInsert(loadTable(...), vectors).
+// Each batch is a single /run call. Strings are DolphinDB-escaped.
+func (w *DolphinDBWriter) buildInsertScript(events []*canonicalizer.CanonicalEvent) string {
+	if len(events) == 0 {
+		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(w.ctx, 10*time.Second)
-	defer cancel()
+	rawIDs := make([]string, 0, len(events))
+	rawSources := make([]string, 0, len(events))
+	rawPayloads := make([]string, 0, len(events))
+	rawReceivedAts := make([]string, 0, len(events))
+	rawSeqs := make([]string, 0, len(events))
 
-	tx, err := w.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+	canIDs := make([]string, 0, len(events))
+	canSymbols := make([]string, 0, len(events))
+	canExchTS := make([]string, 0, len(events))
+	canLocalTS := make([]string, 0, len(events))
+	canTypes := make([]string, 0, len(events))
+	canPrices := make([]string, 0, len(events))
+	canSizes := make([]string, 0, len(events))
+	canSides := make([]string, 0, len(events))
+	canRawIDs := make([]string, 0, len(events))
+
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		rawIDs = append(rawIDs, ddbString(ev.EventID))
+		rawSources = append(rawSources, ddbString(ev.Source))
+		rawPayloads = append(rawPayloads, ddbString(string(ev.RawPayload)))
+		rawReceivedAts = append(rawReceivedAts, strconv.FormatInt(ev.LocalHWTimestamp, 10))
+		rawSeqs = append(rawSeqs, "0")
+
+		canIDs = append(canIDs, ddbString(ev.EventID))
+		canSymbols = append(canSymbols, ddbString(ev.CanonicalSymbol))
+		canExchTS = append(canExchTS, strconv.FormatInt(ev.ExchangeTimestamp, 10))
+		canLocalTS = append(canLocalTS, strconv.FormatInt(ev.LocalHWTimestamp, 10))
+		canTypes = append(canTypes, ddbString(ev.EventType))
+		canPrices = append(canPrices, strconv.FormatFloat(ev.Price, 'f', -1, 64))
+		canSizes = append(canSizes, strconv.FormatFloat(ev.Size, 'f', -1, 64))
+		canSides = append(canSides, ddbString(ev.Side))
+		canRawIDs = append(canRawIDs, ddbString(ev.EventID))
 	}
+
+	var b strings.Builder
+	b.WriteString("try{ ")
+	b.WriteString("rt = loadTable(\"" + w.database + "\", \"raw_events\"); ")
+	b.WriteString("tableInsert(rt, [" + strings.Join(rawIDs, ",") + "] as event_id, ")
+	b.WriteString("[" + strings.Join(rawSources, ",") + "] as source, ")
+	b.WriteString("[" + strings.Join(rawPayloads, ",") + "] as payload, ")
+	b.WriteString("[" + strings.Join(rawReceivedAts, ",") + "] as received_at, ")
+	b.WriteString("[" + strings.Join(rawSeqs, ",") + "] as sequence_num); ")
+	b.WriteString("ct = loadTable(\"" + w.database + "\", \"canonical_events\"); ")
+	b.WriteString("tableInsert(ct, [" + strings.Join(canIDs, ",") + "] as event_id, ")
+	b.WriteString("[" + strings.Join(canSymbols, ",") + "] as symbol, ")
+	b.WriteString("[" + strings.Join(canExchTS, ",") + "] as exchange_ts, ")
+	b.WriteString("[" + strings.Join(canLocalTS, ",") + "] as local_ts, ")
+	b.WriteString("[" + strings.Join(canPrices, ",") + "] as price, ")
+	b.WriteString("[" + strings.Join(canSizes, ",") + "] as size, ")
+	b.WriteString("[" + strings.Join(canSides, ",") + "] as side, ")
+	b.WriteString("[" + strings.Join(canTypes, ",") + "] as event_type); ")
+	b.WriteString("}catch(ex){ throw ex };")
+	return b.String()
+}
+
+// ddbString returns a DolphinDB double-quoted string literal with the contents
+// escaped (backslash and double-quote). Non-printable bytes are preserved as-is;
+// WAL holds the byte-for-byte original — DolphinDB stores a STRING copy here.
+func ddbString(s string) string {
+	r := strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
+	return "\"" + r.Replace(s) + "\""
+}
+
+// runScript sends a DolphinDB script to the /run endpoint over HTTP POST.
+// Returns nil only on HTTP 200.
+func (w *DolphinDBWriter) runScript(script string) error {
+	// Never panic
 	defer func() {
-		if err != nil {
-			tx.Rollback()
+		if r := recover(); r != nil {
+			w.addError(fmt.Errorf("panic in runScript: %v", r))
 		}
 	}()
 
-	// Write to raw_events table
-	if err = w.writeRawEvents(ctx, tx, events); err != nil {
-		return fmt.Errorf("writeRawEvents: %w", err)
+	if w.httpClient == nil {
+		return fmt.Errorf("http client not initialized")
 	}
 
-	// Write to canonical_events table
-	if err = w.writeCanonicalEvents(ctx, tx, events); err != nil {
-		return fmt.Errorf("writeCanonicalEvents: %w", err)
-	}
+	endpoint := fmt.Sprintf("%s/run?user=%s&password=%s",
+		w.baseURL,
+		w.username,
+		w.password)
 
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	return nil
-}
-
-// writeRawEvents writes to raw_events table
-// Columns: event_id, source, payload BLOB, received_at, sequence_num
-func (w *DolphinDBWriter) writeRawEvents(ctx context.Context, tx *sql.Tx, events []*canonicalizer.CanonicalEvent) error {
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO raw_events (event_id, source, payload, received_at, sequence_num) VALUES (?, ?, ?, ?, ?)`)
+	req, err := http.NewRequestWithContext(w.ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(script)))
 	if err != nil {
-		return fmt.Errorf("prepare raw_events: %w", err)
+		return fmt.Errorf("new request: %w", err)
 	}
-	defer stmt.Close()
+	req.Header.Set("Content-Type", "text/plain")
 
-	for _, event := range events {
-		if event == nil {
-			continue
-		}
-		_, err := stmt.ExecContext(ctx,
-			event.EventID,
-			event.Source,
-			event.RawPayload, // BLOB — byte-for-byte preserved
-			event.LocalHWTimestamp,
-			0, // sequence_num: not available in CanonicalEvent struct
-		)
-		if err != nil {
-			return fmt.Errorf("insert raw_event %s: %w", event.EventID, err)
-		}
-	}
-
-	return nil
-}
-
-// writeCanonicalEvents writes to canonical_events table
-// Columns: event_id, symbol, exchange_ts, local_ts, price, size, side
-func (w *DolphinDBWriter) writeCanonicalEvents(ctx context.Context, tx *sql.Tx, events []*canonicalizer.CanonicalEvent) error {
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO canonical_events (event_id, symbol, exchange_ts, local_ts, price, size, side, event_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	resp, err := w.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("prepare canonical_events: %w", err)
+		return fmt.Errorf("http do: %w", err)
 	}
-	defer stmt.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
-	for _, event := range events {
-		if event == nil {
-			continue
-		}
-		_, err := stmt.ExecContext(ctx,
-			event.EventID,
-			event.CanonicalSymbol,
-			event.ExchangeTimestamp,
-			event.LocalHWTimestamp,
-			event.Price,
-			event.Size,
-			event.Side,
-			event.EventType,
-		)
-		if err != nil {
-			return fmt.Errorf("insert canonical_event %s: %w", event.EventID, err)
-		}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("dolphindb status %d: %s", resp.StatusCode, string(body))
 	}
-
+	// Drain body so the connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	return nil
 }
 
-// writeToWAL sends events to WAL fallback
-// This is called when DolphinDB is unavailable or write fails
-func (w *DolphinDBWriter) writeToWAL(events []*canonicalizer.CanonicalEvent) {
-	if w.wal == nil {
-		w.addError(fmt.Errorf("WAL not configured, %d events dropped", len(events)))
-		return
-	}
-
-	for _, event := range events {
-		if event == nil {
-			continue
-		}
-		if err := w.wal.Write(event); err != nil {
-			w.addError(fmt.Errorf("WAL write failed for %s: %w", event.EventID, err))
-		}
-	}
-}
-
-// ensureTables creates DolphinDB tables if they don't exist
+// ensureTables creates the DolphinDB tables if they don't exist.
+// Best-effort: a failure is logged but does not block writes (WAL is the
+// durable fallback).
 func (w *DolphinDBWriter) ensureTables() error {
-	if w.db == nil {
-		return fmt.Errorf("no database connection")
-	}
-
-	ctx, cancel := context.WithTimeout(w.ctx, 10*time.Second)
-	defer cancel()
-
-	// raw_events table
-	_, err := w.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS raw_events (
-			event_id    VARCHAR(64)  NOT NULL,
-			source      VARCHAR(32)  NOT NULL,
-			payload     BLOB,
-			received_at BIGINT       NOT NULL,
-			sequence_num BIGINT      DEFAULT 0,
-			PRIMARY KEY (event_id)
-		)`)
-	if err != nil {
-		return fmt.Errorf("create raw_events: %w", err)
-	}
-
-	// canonical_events table
-	_, err = w.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS canonical_events (
-			event_id    VARCHAR(64)  NOT NULL,
-			symbol      VARCHAR(32)  NOT NULL,
-			exchange_ts BIGINT       NOT NULL,
-			local_ts    BIGINT       NOT NULL,
-			price       DOUBLE       DEFAULT 0.0,
-			size        DOUBLE       DEFAULT 0.0,
-			side        VARCHAR(8)   DEFAULT 'UNKNOWN',
-			event_type  VARCHAR(16)  DEFAULT 'UNKNOWN',
-			PRIMARY KEY (event_id)
-		)`)
-	if err != nil {
-		return fmt.Errorf("create canonical_events: %w", err)
-	}
-
-	return nil
+	script := `
+if(!existsDatabase("` + w.database + `")){
+	db = database("` + w.database + `", VALUE, ` + "`source`" + `, ` + "`BTC/USD`" + `);
+};
+if(!existsTable("` + w.database + `", "raw_events")){
+	tableInsert(createTable(database("` + w.database + `"), "raw_events", event_id SYMBOL, source SYMBOL, payload STRING, received_at LONG, sequence_num LONG));
+};
+if(!existsTable("` + w.database + `", "canonical_events")){
+	tableInsert(createTable(database("` + w.database + `), "canonical_events", event_id SYMBOL, symbol SYMBOL, exchange_ts LONG, local_ts LONG, price DOUBLE, size DOUBLE, side SYMBOL, event_type SYMBOL));
+};`
+	return w.runScript(script)
 }
 
-// reconnectLoop attempts to reconnect to DolphinDB with exponential backoff
-// Evidence: IB Gateway pattern — 1s, 2s, 4s, 8s, 16s, max 30s
+// reconnectLoop attempts to reconnect to DolphinDB with exponential backoff.
+// Evidence: IB Gateway pattern — 1s, 2s, 4s, 8s, 16s, max 30s.
 func (w *DolphinDBWriter) reconnectLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -473,17 +478,12 @@ func (w *DolphinDBWriter) reconnectLoop() {
 			continue
 		}
 
-		// Connected — ensure tables and try WAL replay
-		if err := w.ensureTables(); err != nil {
-			w.addError(fmt.Errorf("ensureTables after reconnect: %w", err))
-		}
-
-		w.replayWAL()
+		// Connected — Connect() already replayed WAL.
 		attempt = 0
 	}
 }
 
-// replayWAL replays WAL events to DolphinDB after recovery
+// replayWAL replays WAL events to DolphinDB after recovery.
 // Evidence: CLAUDE.md — "WAL replayed to DB on recovery"
 func (w *DolphinDBWriter) replayWAL() {
 	// Never panic
@@ -522,19 +522,19 @@ func (w *DolphinDBWriter) replayWAL() {
 
 		if err := w.writeBatch(ptrs); err != nil {
 			w.addError(fmt.Errorf("WAL replay batch %d-%d failed: %w", i, end, err))
-			return
+			return // stop replay; remaining events stay in WAL for next attempt
 		}
 	}
 }
 
-// Flush forces an immediate flush of the current batch
-// Useful for graceful shutdown
+// Flush forces an immediate flush of the current batch.
+// Useful for graceful shutdown.
 func (w *DolphinDBWriter) Flush() error {
 	w.flush()
 	return nil
 }
 
-// Stop gracefully stops the writer, flushing any pending events
+// Stop gracefully stops the writer, flushing any pending events.
 func (w *DolphinDBWriter) Stop() error {
 	// Cancel context (triggers flushLoop final flush)
 	w.cancel()
@@ -542,11 +542,7 @@ func (w *DolphinDBWriter) Stop() error {
 	// Wait for goroutines
 	w.wg.Wait()
 
-	// Close DB connection
-	if w.db != nil {
-		w.db.Close()
-		w.connected.Store(false)
-	}
+	w.connected.Store(false)
 
 	return nil
 }

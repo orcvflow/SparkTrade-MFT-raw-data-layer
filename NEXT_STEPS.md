@@ -1,34 +1,43 @@
 # Raw Data Layer — Next Steps & Future Work
 
 **MVP Status:** ✅ Complete (18/18 tasks implemented)  
-**Build Status:** ✅ All packages compile successfully  
-**Test Status:** ⚠️ 4 failing tests need fixes
+**Build Status:** ✅ All packages compile; `go vet` clean  
+**Test Status:** ✅ All passing — full suite + `-race` green (2026-07-24)
 
-## Immediate Fixes Required (Priority: High)
+## Immediate Fixes — ✅ Resolved (2026-07-24)
 
-### 1. Overflow Sanitization Fix
-**File:** `pkg/canonicalizer/worker_test.go` & `test/unit/death_test.go`  
-**Issue:** 1e308 price should sanitize to 0.0 but currently returns 1e308  
-**Root Cause:** Axle-Axiom sanitizer not detecting float overflow properly  
-**Fix:** Update `axiom.NewMathSanitizer()` to detect overflow at 1e308
+All four previously-failing areas are fixed and verified under `-race`. See
+`PROGRESS.md` → "Bugs Fixed (2026-07-24)" for details.
 
-### 2. Worker Pool Autoscaling Fix  
-**File:** `pkg/workerpool/pool_test.go`  
-**Issue:** Autoscaling test expects more workers after scaling up  
-**Root Cause:** Autoscaling logic not working as expected in test  
-**Fix:** Verify autoscaling thresholds and implement proper scaling
+### 1. Overflow Sanitization ✅
+`SanitizePrice` detects >1e15 overflow → 1e308 sanitizes to 0.0 (`pkg/axiom/sanitizer.go`).
 
-### 3. WAL Replay Test Fix
-**File:** `test/integration/pipeline_test.go` (TestIntegration_WALReplay)  
-**Issue:** Expected 15 replayed events, got 9 (data loss)  
-**Root Cause:** WAL not capturing all events during replay scenario  
-**Fix:** Ensure WAL.Write() is synchronous or add sync.Flush()
+### 2. Worker Pool Autoscaling ✅
+Added a `blockingProcessor` that parks workers, so queue utilization stays ≥80%
+across the 5s autoscaler tick → scale-up actually engages (`pkg/workerpool/pool_test.go`).
+Also: graceful shutdown now drains queued messages (no in-flight loss), and the
+backpressure test is deterministic under `-race` (`pkg/workerpool/pool.go`).
 
-### 4. DB Timeout Test Fix  
-**File:** `test/unit/death_test.go` (Test_DBTimeout)  
-**Issue:** WAL should have 10 events, got 3 (data loss)  
-**Root Cause:** DolphinDB.WriteBatch failing silently, WAL not capturing  
-**Fix:** Ensure WAL.Write() is called on DolphinDB failure
+### 3. WAL Replay ✅
+Fixed the underlying WAL rotation race (see #5) — events are no longer lost to
+duplicate-filename `O_APPEND` collisions.
+
+### 4. DB Timeout / WAL Fallback ✅
+`DolphinDBWriter.Write()` writes to WAL synchronously (lossless) AND accumulates
+the batch; `flush()` does not re-write to WAL (no duplicates). DB-down → events
+safe in WAL (`pkg/storage/dolphindb.go`).
+
+### 5. (Found during fixing) WAL Rotation Race + Data Loss ✅
+Rotation was async (`go w.rotate()`) with second-precision filenames → multiple
+goroutines reopened the same file via `O_APPEND`, losing data and inflating the
+rotation count. Fixed: synchronous `rotateLocked()` + unique filename
+(timestamp + monotonic counter) (`pkg/storage/wal.go`).
+
+### 6. (Found during fixing) Canonicalizer Dropped Its Result ✅
+`Process()` built the `CanonicalEvent` then discarded it; `main.go` re-mapped
+with an empty provider symbol → always "UNKNOWN". Added `Canonical any` to
+`ProcessedMessage`; `outputPipeline` now uses `processed.Canonical` directly
+(`pkg/canonicalizer/worker.go`, `pkg/workerpool/pool.go`, `cmd/raw-data-layer/main.go`).
 
 ## Post-MVP Improvements (Priority: Medium)
 
@@ -259,7 +268,7 @@ spec:
 ### Estimated Timeline
 | Phase | Duration | Key Deliverables |
 |-------|----------|------------------|
-| **MVP Fixes** | 1 week | Fix 4 failing tests |
+| **MVP Fixes** | ✅ done (2026-07-24) | All 4 failing areas fixed + WAL race + canonicalizer drop, suite green incl. `-race` |
 | **Security** | 2 weeks | TLS, auth, audit logging |
 | **Monitoring** | 2 weeks | Prometheus, Grafana, alerts |
 | **Adapters** | 4 weeks | 2 new adapters (NASDAQ + CME) |
@@ -325,7 +334,7 @@ The Raw Data Layer MVP is **complete and functional**, with all 18 tasks impleme
 5. **Features comprehensive testing:** Unit + integration + chaos + death tests
 
 **Next immediate steps:**
-1. Fix the 4 failing tests (overflow, autoscaling, WAL replay, DB timeout)
+1. ~~Fix the 4 failing tests (overflow, autoscaling, WAL replay, DB timeout)~~ — ✅ done 2026-07-24 (plus WAL rotation race + canonicalizer result-drop)
 2. Deploy to staging environment
 3. Load test with 100K+ msg/sec
 4. Begin production rollout

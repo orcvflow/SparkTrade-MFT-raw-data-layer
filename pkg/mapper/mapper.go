@@ -7,8 +7,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
+
+// normalizeSource lowercases the source key so "BINANCE", "Binance", and
+// "binance" all resolve to the same mapping table. This realizes the CLAUDE.md
+// principle that "every spelling collapses at API boundary to canonical symbol".
+//
+// The mapper keys its tables by the lowercase JSON filename (binance.json ->
+// "binance"), but adapters emit uppercase source identifiers on
+// RawMessage.Source (BinanceAdapter sets "BINANCE"). Without normalization the
+// lookup misses and every symbol resolves to "UNKNOWN" even though a valid
+// mapping exists — a pre-existing latent bug surfaced while verifying Addım C.
+func normalizeSource(source string) string {
+	return strings.ToLower(source)
+}
 
 // SymbolMapper manages bidirectional symbol mapping
 // Thread-safe for concurrent read access
@@ -38,8 +52,11 @@ func NewSymbolMapper(mappingsDir string) (*SymbolMapper, error) {
 
 	for _, file := range files {
 		// Extract source name from filename (e.g., "binance.json" -> "binance")
+		// and normalize to lowercase so uppercase adapter lookups ("BINANCE")
+		// resolve to the same table.
 		source := filepath.Base(file)
 		source = source[:len(source)-5] // Remove .json extension
+		source = normalizeSource(source)
 
 		data, err := os.ReadFile(file)
 		if err != nil {
@@ -66,6 +83,7 @@ func NewSymbolMapper(mappingsDir string) (*SymbolMapper, error) {
 // ToCanonical converts a provider-specific symbol to canonical format
 // Returns "UNKNOWN" if symbol is not found in mappings
 func (m *SymbolMapper) ToCanonical(source, providerSymbol string) string {
+	source = normalizeSource(source)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -80,6 +98,7 @@ func (m *SymbolMapper) ToCanonical(source, providerSymbol string) string {
 // ToProvider converts a canonical symbol to provider-specific format
 // Returns empty string if symbol is not found in mappings
 func (m *SymbolMapper) ToProvider(source, canonicalSymbol string) string {
+	source = normalizeSource(source)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -92,6 +111,7 @@ func (m *SymbolMapper) ToProvider(source, canonicalSymbol string) string {
 
 // IsKnown checks if a provider symbol exists in the mappings
 func (m *SymbolMapper) IsKnown(source, providerSymbol string) bool {
+	source = normalizeSource(source)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -101,6 +121,7 @@ func (m *SymbolMapper) IsKnown(source, providerSymbol string) bool {
 
 // GetAllSymbols returns all canonical symbols for a given source
 func (m *SymbolMapper) GetAllSymbols(source string) []string {
+	source = normalizeSource(source)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

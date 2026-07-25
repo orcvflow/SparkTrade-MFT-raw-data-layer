@@ -269,7 +269,14 @@ func Test_ChannelFull_BackpressureEngages(t *testing.T) {
 	const queueSize = 200 // Use smaller size for test speed
 
 	noop := func(ctx context.Context, raw adapter.RawMessage) (workerpool.ProcessedMessage, error) {
-		time.Sleep(1 * time.Second) // Slow worker to keep queue full
+		// Slow worker to keep queue full. MUST be ctx-aware: pool.Stop() drains
+		// the remaining queue through the processor, and a plain time.Sleep would
+		// block for ~queueSize seconds during shutdown (200 queued × 1s = ~200s,
+		// which is what previously made this test take ~205s).
+		select {
+		case <-time.After(1 * time.Second):
+		case <-ctx.Done():
+		}
 		return workerpool.ProcessedMessage{Raw: raw}, nil
 	}
 

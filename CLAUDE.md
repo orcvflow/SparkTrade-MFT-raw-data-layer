@@ -810,8 +810,8 @@ func (w *DolphinDBWriter) Flush() error {
 | Read speed vs pickle | 10x faster | DolphinDB benchmark |
 | Python API speed | 2-3x faster | DolphinDB benchmark |
 | Compression ratio | 4:1 to 10:1 | DolphinDB |
-| Level2 snapshot query | <5 ms | 头部券商 |
-| Historical query | Millisecond | 方正证券 |
+| Level2 snapshot query | <5 ms | 头部券商 ⚠️ təsdiqlənmədi (mənbə qeyri-müəyyən, 2026-07-24) |
+| Historical query | Millisecond | 方正证券 ⚠️ təsdiqlənmədi (mənbə qeyri-müəyyən, 2026-07-24) |
 
 ---
 
@@ -1210,10 +1210,10 @@ var (
 | 3 | fin-stream docs | Tick Normalization | https://docs.rs/fin-stream/latest/src/fin_stream/tick/mod.rs.html |
 | 4 | fin-stream GitHub | Tick Normalization | https://github.com/Mattbusel/fin-stream |
 | 5 | market-tick-aggregator | Go Pipeline | https://github.com/kumar306/market-tick-aggregator |
-| 6 | ZeroMQ Stock Exchange | ZeroMQ Benchmark | http://wiki.zeromq.org/code:examples-exchange |
+| 6 | ZeroMQ Stock Exchange | ZeroMQ Benchmark | http://wiki.zeromq.org/code:examples-exchange ⚠️ **Link ölü** (cert mismatch/wikidot, 2026-07-24) — "3.2M msg/s, 200μs, 18M order/s" tək mənbədə təsdiqlənmədi |
 | 7 | Homalos DeepWiki | ZeroMQ Distribution | https://deepwiki.com/Homalos/Homalos/5.5-subscription-manager |
-| 8 | DataSea.cn Worker Pool | Worker Pool Benchmark | https://datasea.cn/go0220501594.html |
-| 9 | DolphinDB vs Pickle | Storage Benchmark | https://docs.dolphindb.cn/zh/2.00.16/tutorials/pickle_comparison.html |
+| 8 | DataSea.cn Worker Pool | Worker Pool Benchmark | https://datasea.cn/go0220501594.html ⚠️ **Link ölü** (cert expired, 2026-07-24) — "1842/1987 req/s, 1.24GB/316MB, 1.83s/0.21s GC, OOM at 37s" təsdiqlənə bilmədi; lakin bounded-pool prinsipi başqa mənbələrdən sübuta malik (goperf.dev, adtac.in) |
+| 9 | DolphinDB vs Pickle | Storage Benchmark | https://docs.dolphindb.cn/zh/2.00.16/tutorials/pickle_comparison.html ✅ Təsdiqləndi: 10x read, 2-3x API, ~8:1 compression. ⚠️ Lakin "<5ms Level2 query" və "方正证券 10+ il" iddiaları bu səhifədə yoxdur — mənbəyi qeyri-müəyyən |
 | 10 | project-chrono | Binance Adapter | https://github.com/project-chrono |
 | 11 | IB API v1.0.4 | IB Gateway | https://www.interactivebrokers.com/api/doc.html |
 | 12 | moonshot IBKR | IBKR Integrations | https://github.com/moonshot |

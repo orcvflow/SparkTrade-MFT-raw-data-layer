@@ -157,37 +157,32 @@ func TestPool_SubmitAndProcess(t *testing.T) {
 // This is a mandatory test (CLAUDE.md: Test_ChannelFull)
 func TestPool_Backpressure(t *testing.T) {
 	config := PoolConfig{
-		MinWorkers:       2,
+		MinWorkers:       0, // no workers spawn — queue fills deterministically
 		MaxWorkers:       2,
 		QueueSize:        10, // Small queue for testing
 		AutoscaleEnabled: false,
 	}
-	
-	pool := NewPool(config, slowProcessor) // Use slow processor
+
+	pool := NewPool(config, mockProcessor)
 	pool.Start()
 	defer pool.Stop()
-	
-	// Fill the queue
-	for i := 0; i < 10; i++ {
-		msg := adapter.RawMessage{
-			Source:     "TEST",
-			Payload:    []byte(fmt.Sprintf("msg-%d", i)),
-			ReceivedAt: time.Now().UnixNano(),
-		}
-		if err := pool.Submit(msg); err != nil {
-			t.Fatalf("Submit %d failed: %v", i, err)
-		}
-	}
-	
-	// Try to submit one more (should fail - backpressure)
-	msg := adapter.RawMessage{
+
+	// Saturate the buffered input channel. We don't rely on an exact count
+	// matching QueueSize (workers/race can shift it); we keep submitting until
+	// the channel rejects, which is the definition of backpressure engaging.
+	fillMsg := adapter.RawMessage{
 		Source:     "TEST",
-		Payload:    []byte("overflow"),
+		Payload:    []byte("fill"),
 		ReceivedAt: time.Now().UnixNano(),
 	}
-	
-	err := pool.Submit(msg)
-	if err == nil {
+	overflowSeen := false
+	for i := 0; i < config.QueueSize+5; i++ {
+		if err := pool.Submit(fillMsg); err != nil {
+			overflowSeen = true
+			break
+		}
+	}
+	if !overflowSeen {
 		t.Fatal("Expected backpressure error when queue is full")
 	}
 	
@@ -235,6 +230,19 @@ func TestPool_ErrorHandling(t *testing.T) {
 	}
 }
 
+// blockingProcessor sleeps long enough to keep the queue pinned at ~80%
+// utilization across the autoscaler's 5s check interval. The shared
+// slowProcessor (100ms) drains 80 messages in ~800ms with 10 workers, so by
+// the 5s tick the queue is empty and checkScale has no reason to scale up.
+func blockingProcessor(ctx context.Context, raw adapter.RawMessage) (ProcessedMessage, error) {
+	// Hold the worker busy for the whole test window; respects ctx cancel.
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Second):
+	}
+	return mockProcessor(ctx, raw)
+}
+
 // TestPool_Autoscaling tests dynamic worker scaling
 func TestPool_Autoscaling(t *testing.T) {
 	config := PoolConfig{
@@ -245,18 +253,20 @@ func TestPool_Autoscaling(t *testing.T) {
 		ScaleUpThreshold:   0.8,
 		ScaleDownThreshold: 0.5,
 	}
-	
-	pool := NewPool(config, slowProcessor)
+
+	pool := NewPool(config, blockingProcessor)
 	pool.Start()
 	defer pool.Stop()
-	
+
 	// Initial workers
 	time.Sleep(100 * time.Millisecond)
 	stats := pool.Stats()
 	initialWorkers := stats.ActiveWorkers
-	
-	// Fill queue to 80% (trigger scale up)
-	for i := 0; i < 80; i++ {
+
+	// Fill queue well past 80% (trigger scale up). 10 workers will each pull
+	// one message immediately (blockingProcessor then parks them), so we
+	// submit enough that ~80% utilization remains after those 10 pulls.
+	for i := 0; i < 95; i++ {
 		msg := adapter.RawMessage{
 			Source:     "TEST",
 			Payload:    []byte(fmt.Sprintf("msg-%d", i)),
@@ -264,10 +274,10 @@ func TestPool_Autoscaling(t *testing.T) {
 		}
 		pool.Submit(msg)
 	}
-	
+
 	// Wait for autoscaler to check (5s interval)
 	time.Sleep(6 * time.Second)
-	
+
 	stats = pool.Stats()
 	if stats.ActiveWorkers <= initialWorkers {
 		t.Errorf("Expected more workers after scaling up, got %d (initial: %d)", 

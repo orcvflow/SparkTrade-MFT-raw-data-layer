@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package ipc;
+
+option go_package = "raw-data-layer/pkg/ipc;ipc";
+
+// IPCMessage is the wire envelope for all inter-process traffic on the UDS
+// transport. The transport layer frames and delivers opaque payloads; the
+// sender/receiver agree on the payload encoding (RawMessage or CanonicalEvent).
+message IPCMessage {
+  string type = 1;     // "raw" | "canonical" | "control"
+  bytes payload = 2;   // opaque serialized message
+  uint64 seq = 3;      // monotonic sequence number
+}
+
+// RawFrame carries an adapter.RawMessage across the adapter→canonicalizer edge.
+// The raw Payload is byte-for-byte identical to wire data (never modified).
+message RawFrame {
+  string source = 1;          // "BINANCE" | "IB" | ...
+  bytes payload = 2;          // original wire bytes — UNTOUCHED
+  int64 received_at = 3;      // hardware timestamp (ns since epoch)
+  uint64 sequence_num = 4;    // source sequence number (if available)
+}
