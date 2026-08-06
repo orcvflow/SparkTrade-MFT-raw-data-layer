@@ -1,0 +1,35 @@
+FROM ubuntu:22.04
+
+LABEL maintainer="raw-data-layer"
+LABEL description="DolphinDB Time-Series Database for Market Data"
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    unzip \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install DolphinDB
+WORKDIR /opt
+RUN wget https://www.dolphindb.com/downloads/DolphinDB_Linux64_V2.00.10.zip && \
+    unzip DolphinDB_Linux64_V2.00.10.zip && \
+    rm DolphinDB_Linux64_V2.00.10.zip && \
+    chmod +x /opt/server/dolphindb
+
+# Create data and log directories
+RUN mkdir -p /data /log
+
+# Expose HTTP API port
+EXPOSE 8848
+
+# Set working directory
+WORKDIR /opt/server
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+  CMD curl -f http://localhost:8848 || exit 1
+
+# Start DolphinDB in single-node mode
+CMD ["./dolphindb", "-console", "0", "-mode", "single", "-home", "/data", "-logFile", "/log/dolphindb.log", "-localSite", "localhost:8848:local8848"]

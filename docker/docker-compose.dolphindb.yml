@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  dolphindb:
+    build:
+      context: .
+      dockerfile: Dockerfile.dolphindb
+    container_name: dolphindb
+    ports:
+      - "8848:8848"  # HTTP API port
+    volumes:
+      - dolphindb_data:/data
+      - dolphindb_log:/log
+      - ./dolphindb/init:/init:ro
+    environment:
+      - LANG=en_US.UTF-8
+      - TZ=UTC
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8848"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - raw-data-layer
+
+volumes:
+  dolphindb_data:
+    driver: local
+  dolphindb_log:
+    driver: local
+
+networks:
+  raw-data-layer:
+    driver: bridge

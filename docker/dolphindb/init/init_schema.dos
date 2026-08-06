@@ -1,0 +1,50 @@
+// DolphinDB Initialization Script for Raw Data Layer
+// This script creates the database and tables for market data storage
+
+// Create database
+login("admin", "123456")
+
+// Drop existing database if it exists (clean start)
+try { dropDatabase("dfs://raw_data") } catch(ex) { print("Database does not exist, creating new one") }
+
+// Create DFS database with date partitioning
+db = database("dfs://raw_data", VALUE, 2020.01.01..2030.12.31)
+
+// ============================================================================
+// Table 1: raw_events (BLOB storage for untouched payloads)
+// ============================================================================
+schema_raw = table(
+    1:0,
+    `event_id`timestamp`source`payload`sequence_num,
+    [LONG, TIMESTAMP, SYMBOL, BLOB, LONG]
+)
+
+// Create partitioned table
+raw_events = db.createPartitionedTable(schema_raw, `raw_events, `timestamp)
+
+print("Created table: raw_events")
+
+// ============================================================================
+// Table 2: canonical_events (structured market data)
+// ============================================================================
+schema_canonical = table(
+    1:0,
+    `event_id`timestamp`event_type`canonical_symbol`provider_symbol`source`asset_class`price`size`exchange_timestamp`local_timestamp`metadata,
+    [LONG, TIMESTAMP, SYMBOL, SYMBOL, SYMBOL, SYMBOL, SYMBOL, DOUBLE, DOUBLE, LONG, LONG, BLOB]
+)
+
+// Create partitioned table
+canonical_events = db.createPartitionedTable(schema_canonical, `canonical_events, `timestamp)
+
+print("Created table: canonical_events")
+
+// ============================================================================
+// Create indexes for fast queries
+// ============================================================================
+// Index on canonical_symbol for symbol-based queries
+raw_events = loadTable("dfs://raw_data", "raw_events")
+canonical_events = loadTable("dfs://raw_data", "canonical_events")
+
+print("DolphinDB schema initialization complete!")
+print("Database: dfs://raw_data")
+print("Tables: raw_events, canonical_events")
