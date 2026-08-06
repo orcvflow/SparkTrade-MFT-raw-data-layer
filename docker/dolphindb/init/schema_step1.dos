@@ -1,0 +1,3 @@
+login("admin","123456");
+if(existsDatabase("dfs://raw_data")){db=database("dfs://raw_data")}else{db=database("dfs://raw_data",VALUE,2020.01M..2030.12M)};
+"DB_CREATED"
