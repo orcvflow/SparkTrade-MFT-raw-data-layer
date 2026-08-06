@@ -1,10 +1,20 @@
 # Raw Data Layer — Next Steps & Future Work
 
-**MVP Status:** ✅ Complete (18/18 tasks) + Addım C (multi-process) + Addım D (SIMD/zero-copy) + Addım E (production deploy + system-level measurement)
-**Merge Status:** ✅ `main` → `7988f94` (C+D ff-merge, 2026-07-25); `v0.4.0` tag; Addım E working tree commit pending
-**Build Status:** ✅ All packages compile; `go vet` clean
-**Test Status:** ✅ All passing — full suite + `-race` green + regression green + benchmark MEASURED (2026-07-25)
-**Next Phase:** Addım F — production-default batched WAL + live 4-process UDS benchmark (see `STEP-E.md` §9)
+**MVP Status:** ✅ Complete (18/18 tasks) + Addım C (multi-process) + Addım D (SIMD/zero-copy) + Addım E (production deploy + system-level measurement)  
+**Merge Status:** ✅ `main` → `ca36626` (2026-08-06); `v0.4.0` tag  
+**Build Status:** ✅ All packages compile; `go vet` clean  
+**Test Status:** ✅ All passing — full suite + `-race` green + regression green + benchmark MEASURED  
+**Real Data:** ✅ 948 Binance events tested, 452 written to WAL  
+**Next Phase:** ⚠️ CRITICAL - DolphinDB Schema Apply (10 dəqiqə) → see `RAPORT_2026_08_06.md`
+
+## 🔥 CRITICAL - DolphinDB Schema Apply (2026-08-06)
+
+**Problem:** 427 events sent to DolphinDB, but tables don't exist → nothing written!  
+**Status:** Schema file ready (`docker/dolphindb/init/init_schema.dos`)  
+**Time:** 10 minutes  
+**Guide:** See `RAPORT_2026_08_06.md` for step-by-step action plan
+
+---
 
 ## Immediate Fixes — ✅ Resolved (2026-07-24)
 
