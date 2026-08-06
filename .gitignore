@@ -13,9 +13,6 @@ bench_report.json
 *.test
 *.out
 
-# Proto generated
-proto/gen/
-
 # Data
 data/
 *.db
