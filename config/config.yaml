@@ -3,8 +3,8 @@
 
 adapters:
   binance:
-    enabled: true
-    endpoint: "wss://stream.binance.com:9443/ws"  # Mainnet public market-data WS (read-only, no credentials). Testnet /ws returns 404 — verified Addım F F3.
+    enabled: true  # Enabled for real data test
+    endpoint: "wss://stream.binance.com:9443/ws"  # Mainnet public market-data WS
     symbols:
       - "btcusdt"
       - "ethusdt"
