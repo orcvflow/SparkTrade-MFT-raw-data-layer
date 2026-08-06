@@ -19,6 +19,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      
+      # Install protoc and generate Protobuf code
+      - name: Install Protobuf Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+      
+      - name: Generate Protobuf Code
+        run: |
+          chmod +x scripts/generate_proto.sh
+          ./scripts/generate_proto.sh
+      
       - name: Build all
         run: go build ./...
 

@@ -24,7 +24,7 @@ var DefaultBackoff = []int{1, 2, 4, 8, 16, 30}
 
 // ClientConfig configures a UDS client.
 type ClientConfig struct {
-	QueueSize     int           // reserved for future in-mem fast-path (unused in Phase 1)
+	QueueSize     int           // in-mem fast-path channel capacity (default 4096)
 	Backoff       []int         // reconnect backoff seconds (default DefaultBackoff)
 	DialTimeout   time.Duration // per-dial deadline (default 5s)
 	WriteTimeout  time.Duration // per-frame write deadline (default 2s)
@@ -35,25 +35,39 @@ type ClientConfig struct {
 // Client is a UDS client that delivers IPCMessages to a downstream Server. It is
 // lossless and FIFO under downstream outages.
 //
-// Design (single ordered store): every Send appends the marshaled message to an
-// append-only on-disk spool — the single source of truth. The drainLoop replays
-// the spool in order. This avoids the classic two-buffer (channel + spool) FIFO
-// hazard, where draining one buffer before the other delivers messages out of
-// order when both hold data with interleaved ages.
+// Design (two-tier single-ordered queue): the in-memory `queue` channel is the
+// primary fast path — normal-operation (downstream up) messages traverse it with
+// NO disk I/O. The on-disk spool is the overflow sink, used when the queue is full
+// (downstream slow/down) and as the durable backlog during outages.
+//
+// FIFO hazard resolution: with two buffers, neither "drain channel first" nor
+// "drain spool first" is always correct — a message's age relative to the other
+// buffer flips after each drain. The `spilling` flag resolves it: once ANY
+// message overflows to the spool, spilling=true and ALL new Sends route to the
+// spool (never the queue) until the spool is fully drained. This makes the
+// invariant "queue contents are always older than spool contents" hold at every
+// drain, so draining queue-then-spool is always FIFO-correct. spilling is set by
+// Send on overflow and cleared by drainLoop only after the spool is empty.
+//
+// Lossless: on a write failure (conn break) while draining the queue, the popped
+// message and all remaining queue messages are spilled to the spool in arrival
+// order before reconnect — never a loss. The authoritative lossless store is the
+// storage process's WAL; this spool is best-effort smoothing.
 //
 // Connection liveness: each connection has a readLoop that detects a server-side
-// close via EOF and breaks the connection immediately (not lazily on the next
-// write). A broken connection triggers reconnect with backoff. Send never
-// blocks for I/O while the downstream is down; the spool absorbs the backlog.
+// close via EOF and breaks the connection immediately. Send never blocks for I/O
+// while the downstream is down; the spool absorbs the backlog.
 //
 // Send never panics.
 type Client struct {
 	path    string
 	cfg     ClientConfig
 	spool   *spool
-	notify  chan struct{} // cap-1: woken after each append
+	queue   chan []byte // in-mem fast path (primary queue); overflow → spool
+	notify  chan struct{} // cap-1: woken on spool overflow (queue path needs no wake)
 	connBroken chan struct{} // cap-1: woken when the conn breaks
 	backoff []int
+	spilling atomic.Bool // true while spool holds overflow → route Send to spool
 
 	mu   sync.RWMutex
 	conn net.Conn
@@ -87,6 +101,9 @@ func NewClient(path string, cfg ClientConfig) (*Client, error) {
 	if cfg.SpoolPath == "" {
 		cfg.SpoolPath = path + ".spool"
 	}
+	if cfg.QueueSize <= 0 {
+		cfg.QueueSize = 4096
+	}
 
 	sp, err := newSpool(cfg.SpoolPath, cfg.MaxSpoolBytes)
 	if err != nil {
@@ -94,15 +111,16 @@ func NewClient(path string, cfg ClientConfig) (*Client, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
-		path:      path,
-		cfg:       cfg,
-		spool:     sp,
-		notify:    make(chan struct{}, 1),
+		path:       path,
+		cfg:        cfg,
+		spool:      sp,
+		queue:      make(chan []byte, cfg.QueueSize),
+		notify:     make(chan struct{}, 1),
 		connBroken: make(chan struct{}, 1),
-		backoff:   cfg.Backoff,
-		ctx:       ctx,
-		cancel:    cancel,
-		errs:      make([]error, 0),
+		backoff:    cfg.Backoff,
+		ctx:        ctx,
+		cancel:     cancel,
+		errs:       make([]error, 0),
 	}
 	return c, nil
 }
@@ -113,14 +131,21 @@ func (c *Client) Start() {
 	go c.drainLoop()
 }
 
-// Send delivers m to the downstream via the spool. It never blocks for I/O
-// while the downstream is down (the common outage case). It returns:
-//   - nil on success (the message is durably in the spool and will be sent);
+// Send delivers m to the downstream. It never blocks for I/O while the
+// downstream is down (the common outage case). Routing (FIFO-safe):
+//   - if spilling (spool holds overflow) → append to spool;
+//   - else try the in-mem queue (non-blocking); on full → set spilling +
+//     append to spool (overflow).
+// Returns:
+//   - nil on success (queued in-memory or durably in the spool, will be sent);
 //   - ErrSpoolFull when the on-disk spool has reached its cap (hard
 //     backpressure — the caller should slow the producer);
 //   - ErrClientClosed after Stop.
 //
-// Never panics.
+// Never panics. Per-client Send is single-threaded in this pipeline (one
+// producer per Client), so the spilling flag is SPSC-safe; concurrent Send
+// callers are still safe (serialized on spool.append's mutex) but their
+// relative order is non-deterministic, as today.
 func (c *Client) Send(m *IPCMessage) error {
 	if c.closed.Load() {
 		return ErrClientClosed
@@ -132,6 +157,28 @@ func (c *Client) Send(m *IPCMessage) error {
 	if err != nil {
 		return err
 	}
+
+	// Spilling: a prior overflow is still draining from the spool. Route to the
+	// spool so the queue never holds a message newer than spool contents.
+	if c.spilling.Load() {
+		if err := c.spool.append(body); err != nil {
+			return err
+		}
+		c.spooled.Add(1)
+		c.signal(c.notify)
+		return nil
+	}
+
+	// Fast path: non-blocking push to the in-memory queue (no disk I/O).
+	select {
+	case c.queue <- body:
+		return nil
+	default:
+	}
+
+	// Queue full → overflow to the durable spool. Set spilling FIRST so concurrent
+	// producers (and our own next Send) route to the spool until it drains.
+	c.spilling.Store(true)
 	if err := c.spool.append(body); err != nil {
 		return err // ErrSpoolFull → caller applies hard backpressure
 	}
