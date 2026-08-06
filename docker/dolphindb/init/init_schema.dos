@@ -1,50 +1,90 @@
-// DolphinDB Initialization Script for Raw Data Layer
-// This script creates the database and tables for market data storage
+// ============================================================================
+// DolphinDB Schema Initialization Script
+// Project: SparkTrade-MFT Raw Data Layer
+// Date: 2026-08-06
+// Purpose: Create database and tables for market data storage
+// ============================================================================
 
-// Create database
+// Login
 login("admin", "123456")
 
-// Drop existing database if it exists (clean start)
-try { dropDatabase("dfs://raw_data") } catch(ex) { print("Database does not exist, creating new one") }
+// ============================================================================
+// Step 1: Create Database (if not exists)
+// ============================================================================
+print("Step 1: Creating database...")
 
-// Create DFS database with date partitioning
-db = database("dfs://raw_data", VALUE, 2020.01.01..2030.12.31)
+if(existsDatabase("dfs://raw_data")) {
+    print("Database dfs://raw_data already exists")
+    db = database("dfs://raw_data")
+} else {
+    // Partition by month (2020-2030)
+    db = database("dfs://raw_data", VALUE, 2020.01M..2030.12M)
+    print("✅ Database dfs://raw_data created (VALUE partition by month)")
+}
 
 // ============================================================================
-// Table 1: raw_events (BLOB storage for untouched payloads)
+// Step 2: Create raw_events Table (BLOB storage for untouched payloads)
 // ============================================================================
-schema_raw = table(
-    1:0,
-    `event_id`timestamp`source`payload`sequence_num,
-    [LONG, TIMESTAMP, SYMBOL, BLOB, LONG]
-)
+print("Step 2: Creating raw_events table...")
 
-// Create partitioned table
-raw_events = db.createPartitionedTable(schema_raw, `raw_events, `timestamp)
-
-print("Created table: raw_events")
-
-// ============================================================================
-// Table 2: canonical_events (structured market data)
-// ============================================================================
-schema_canonical = table(
-    1:0,
-    `event_id`timestamp`event_type`canonical_symbol`provider_symbol`source`asset_class`price`size`exchange_timestamp`local_timestamp`metadata,
-    [LONG, TIMESTAMP, SYMBOL, SYMBOL, SYMBOL, SYMBOL, SYMBOL, DOUBLE, DOUBLE, LONG, LONG, BLOB]
-)
-
-// Create partitioned table
-canonical_events = db.createPartitionedTable(schema_canonical, `canonical_events, `timestamp)
-
-print("Created table: canonical_events")
+if(existsTable("dfs://raw_data", "raw_events")) {
+    print("Table raw_events already exists")
+} else {
+    schema_raw = table(
+        100:0,
+        `event_id`source`payload`received_at`sequence_num,
+        [STRING, SYMBOL, BLOB, TIMESTAMP, LONG]
+    )
+    
+    db.createPartitionedTable(schema_raw, `raw_events, `received_at)
+    print("✅ Table raw_events created")
+    print("   Columns: event_id(STRING), source(SYMBOL), payload(BLOB), received_at(TIMESTAMP), sequence_num(LONG)")
+    print("   Partition: received_at (monthly)")
+}
 
 // ============================================================================
-// Create indexes for fast queries
+// Step 3: Create canonical_events Table (structured market data)
 // ============================================================================
-// Index on canonical_symbol for symbol-based queries
-raw_events = loadTable("dfs://raw_data", "raw_events")
-canonical_events = loadTable("dfs://raw_data", "canonical_events")
+print("Step 3: Creating canonical_events table...")
 
-print("DolphinDB schema initialization complete!")
+if(existsTable("dfs://raw_data", "canonical_events")) {
+    print("Table canonical_events already exists")
+} else {
+    schema_canonical = table(
+        100:0,
+        `event_id`canonical_symbol`exchange_timestamp`local_hw_timestamp`event_type`price`size`side`source`raw_event_id,
+        [STRING, SYMBOL, TIMESTAMP, TIMESTAMP, SYMBOL, DOUBLE, DOUBLE, SYMBOL, SYMBOL, STRING]
+    )
+    
+    db.createPartitionedTable(schema_canonical, `canonical_events, `exchange_timestamp)
+    print("✅ Table canonical_events created")
+    print("   Columns: event_id, canonical_symbol, exchange_timestamp, local_hw_timestamp, event_type, price, size, side, source, raw_event_id")
+    print("   Partition: exchange_timestamp (monthly)")
+}
+
+// ============================================================================
+// Step 4: Verify Tables
+// ============================================================================
+print("Step 4: Verifying tables...")
+
+raw_count = exec count(*) from loadTable("dfs://raw_data", "raw_events")
+canonical_count = exec count(*) from loadTable("dfs://raw_data", "canonical_events")
+
+print("✅ raw_events row count: " + string(raw_count))
+print("✅ canonical_events row count: " + string(canonical_count))
+
+// ============================================================================
+// Summary
+// ============================================================================
+print("")
+print("═══════════════════════════════════════════════════════════")
+print("  DolphinDB Schema Initialization Complete!")
+print("═══════════════════════════════════════════════════════════")
+print("")
 print("Database: dfs://raw_data")
-print("Tables: raw_events, canonical_events")
+print("Tables:")
+print("  1. raw_events (BLOB payload storage)")
+print("  2. canonical_events (normalized market data)")
+print("")
+print("Ready to receive real market data from adapters!")
+print("═══════════════════════════════════════════════════════════")
