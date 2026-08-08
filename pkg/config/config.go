@@ -24,30 +24,31 @@ import (
 // Config mirrors config/config.yaml. Fields the multi-process split needs are
 // modeled; axiom/performance sections are intentionally omitted (ignored on load).
 type Config struct {
-	MappingsDir string          `yaml:"mappings_dir"`
-	Adapters    AdaptersConfig  `yaml:"adapters"`
-	WorkerPool  WorkerPoolConf  `yaml:"worker_pool"`
-	Publisher   PublisherConf   `yaml:"publisher"`
-	Storage     StorageConf     `yaml:"storage"`
+	MappingsDir string         `yaml:"mappings_dir"`
+	Adapters    AdaptersConfig `yaml:"adapters"`
+	WorkerPool  WorkerPoolConf `yaml:"worker_pool"`
+	Publisher   PublisherConf  `yaml:"publisher"`
+	Storage     StorageConf    `yaml:"storage"`
 	Validation  ValidationConf `yaml:"validation"`
-	Health      HealthConf      `yaml:"health"`
-	Logging     LoggingConf     `yaml:"logging"`
-	IPC         IPCConf         `yaml:"ipc"`       // multi-process UDS paths
-	Processes   ProcessesConf  `yaml:"processes"`  // per-process health ports
+	Health      HealthConf     `yaml:"health"`
+	Logging     LoggingConf    `yaml:"logging"`
+	IPC         IPCConf        `yaml:"ipc"`       // multi-process UDS paths
+	Processes   ProcessesConf  `yaml:"processes"` // per-process health ports
 }
 
 type AdaptersConfig struct {
 	Binance BinanceConfig `yaml:"binance"`
 	IB      IBConfig      `yaml:"ib"`
+	MT5     *MT5Config    `yaml:"mt5"` // pointer: optional, may be nil if config has no mt5 block
 }
 
 type BinanceConfig struct {
-	Enabled          bool            `yaml:"enabled"`
-	Endpoint         string          `yaml:"endpoint"`
-	Symbols          []string        `yaml:"symbols"`
-	Reconnect        ReconnectConf   `yaml:"reconnect"`
-	HeartbeatInterval string         `yaml:"heartbeat_interval"`
-	SessionRotation  string          `yaml:"session_rotation"`
+	Enabled           bool          `yaml:"enabled"`
+	Endpoint          string        `yaml:"endpoint"`
+	Symbols           []string      `yaml:"symbols"`
+	Reconnect         ReconnectConf `yaml:"reconnect"`
+	HeartbeatInterval string        `yaml:"heartbeat_interval"`
+	SessionRotation   string        `yaml:"session_rotation"`
 }
 
 type IBConfig struct {
@@ -60,8 +61,17 @@ type IBConfig struct {
 	RequestTimeout string        `yaml:"request_timeout"`
 }
 
+// MT5Config: ZeroMQ SUB from MQL5 EA. Optional (pointer in AdaptersConfig).
+type MT5Config struct {
+	Enabled           bool          `yaml:"enabled"`
+	Endpoint          string        `yaml:"endpoint"` // tcp://localhost:5556
+	Symbols           []string      `yaml:"symbols"`
+	Reconnect         ReconnectConf `yaml:"reconnect"`
+	HeartbeatInterval string        `yaml:"heartbeat_interval"` // not used yet; future
+}
+
 type ReconnectConf struct {
-	MaxAttempts   int   `yaml:"max_attempts"`
+	MaxAttempts    int   `yaml:"max_attempts"`
 	BackoffSeconds []int `yaml:"backoff_seconds"`
 }
 
@@ -104,19 +114,19 @@ type WALConf struct {
 	RotationCount  int64  `yaml:"rotation_count"`
 	SyncInterval   string `yaml:"sync_interval"`
 	Mode           string `yaml:"mode"`             // "sync" | "batched" (default "batched" — Addım F)
-	BatchTimeoutMs int    `yaml:"batch_timeout_ms"`  // batched flush interval (default 50ms)
+	BatchTimeoutMs int    `yaml:"batch_timeout_ms"` // batched flush interval (default 50ms)
 }
 
 type DolphinDBConf struct {
-	Enabled        bool          `yaml:"enabled"`
-	Host           string        `yaml:"host"`
-	Port           int           `yaml:"port"`
-	Username       string        `yaml:"username"`
-	Password       string        `yaml:"password"`
-	Database       string        `yaml:"database"`
-	BatchSize      int           `yaml:"batch_size"`
-	BatchTimeout   string        `yaml:"batch_timeout"`
-	ConnectionPool ConnPoolConf  `yaml:"connection_pool"`
+	Enabled        bool         `yaml:"enabled"`
+	Host           string       `yaml:"host"`
+	Port           int          `yaml:"port"`
+	Username       string       `yaml:"username"`
+	Password       string       `yaml:"password"`
+	Database       string       `yaml:"database"`
+	BatchSize      int          `yaml:"batch_size"`
+	BatchTimeout   string       `yaml:"batch_timeout"`
+	ConnectionPool ConnPoolConf `yaml:"connection_pool"`
 }
 
 type ConnPoolConf struct {
@@ -131,11 +141,11 @@ type ValidationConf struct {
 }
 
 type LayersConf struct {
-	Connectivity    bool `yaml:"connectivity"`
-	Protocol        bool `yaml:"protocol"`
-	DataIntegrity   bool `yaml:"data_integrity"`
-	FaultTolerance  bool `yaml:"fault_tolerance"`
-	Performance     bool `yaml:"performance"`
+	Connectivity   bool `yaml:"connectivity"`
+	Protocol       bool `yaml:"protocol"`
+	DataIntegrity  bool `yaml:"data_integrity"`
+	FaultTolerance bool `yaml:"fault_tolerance"`
+	Performance    bool `yaml:"performance"`
 }
 
 type HealthConf struct {
@@ -146,10 +156,10 @@ type HealthConf struct {
 }
 
 type LoggingConf struct {
-	Level  string     `yaml:"level"`
-	Format string     `yaml:"format"`
-	Output string     `yaml:"output"`
-	File   FileConf   `yaml:"file"`
+	Level  string   `yaml:"level"`
+	Format string   `yaml:"format"`
+	Output string   `yaml:"output"`
+	File   FileConf `yaml:"file"`
 }
 
 type FileConf struct {
@@ -161,17 +171,17 @@ type FileConf struct {
 
 // IPCConf holds the UDS socket paths for the multi-process pipeline.
 type IPCConf struct {
-	AdapterToCanonicalizer string `yaml:"adapter_to_canonicalizer"`
+	AdapterToCanonicalizer   string `yaml:"adapter_to_canonicalizer"`
 	CanonicalizerToPublisher string `yaml:"canonicalizer_to_publisher"`
-	PublisherToStorage      string `yaml:"publisher_to_storage"`
+	PublisherToStorage       string `yaml:"publisher_to_storage"`
 }
 
 // ProcessesConf holds per-process health/metrics ports (Addım C).
 type ProcessesConf struct {
-	AdapterHealthPort      int `yaml:"adapter_health_port"`
+	AdapterHealthPort       int `yaml:"adapter_health_port"`
 	CanonicalizerHealthPort int `yaml:"canonicalizer_health_port"`
-	PublisherHealthPort    int `yaml:"publisher_health_port"`
-	StorageHealthPort      int `yaml:"storage_health_port"`
+	PublisherHealthPort     int `yaml:"publisher_health_port"`
+	StorageHealthPort       int `yaml:"storage_health_port"`
 }
 
 // DefaultConfig returns a Config with sensible defaults (no file needed).
@@ -181,14 +191,14 @@ func DefaultConfig() Config {
 		Adapters: AdaptersConfig{
 			Binance: BinanceConfig{
 				Enabled: true, Endpoint: "wss://stream.binance.com:9443/ws", // mainnet public market-data WS (testnet /ws is 404 — verified Addım F F3)
-				Symbols: []string{"btcusdt", "ethusdt", "bnbusdt"},
-				Reconnect: ReconnectConf{MaxAttempts: 10, BackoffSeconds: []int{1, 2, 4, 8, 16, 30}},
+				Symbols:           []string{"btcusdt", "ethusdt", "bnbusdt"},
+				Reconnect:         ReconnectConf{MaxAttempts: 10, BackoffSeconds: []int{1, 2, 4, 8, 16, 30}},
 				HeartbeatInterval: "30s", SessionRotation: "24h",
 			},
 			IB: IBConfig{
 				Enabled: false, Host: "localhost", Port: 7497, ClientID: 1,
-				Symbols: []string{"AAPL", "MSFT", "GOOGL"},
-				Reconnect: ReconnectConf{MaxAttempts: 10, BackoffSeconds: []int{1, 2, 4, 8, 16, 30}},
+				Symbols:        []string{"AAPL", "MSFT", "GOOGL"},
+				Reconnect:      ReconnectConf{MaxAttempts: 10, BackoffSeconds: []int{1, 2, 4, 8, 16, 30}},
 				RequestTimeout: "10s",
 			},
 		},
@@ -200,16 +210,16 @@ func DefaultConfig() Config {
 			HeartbeatInterval: "5s", HWM: 10000,
 		}},
 		Storage: StorageConf{
-			WAL: WALConf{Enabled: true, Directory: "./data/wal", RotationSize: 104857600, RotationCount: 10000, SyncInterval: "1s", Mode: "batched", BatchTimeoutMs: 50},
+			WAL:       WALConf{Enabled: true, Directory: "./data/wal", RotationSize: 104857600, RotationCount: 10000, SyncInterval: "1s", Mode: "batched", BatchTimeoutMs: 50},
 			DolphinDB: DolphinDBConf{Enabled: false, Host: "localhost", Port: 8848, Username: "admin", Password: "123456", Database: "dfs://raw_data", BatchSize: 1000, BatchTimeout: "1s"},
 		},
 		Validation: ValidationConf{Enabled: true, Layers: LayersConf{true, true, true, true, true}},
-		Health: HealthConf{HTTPPort: 8080, MetricsPort: 9090, ReadinessPath: "/ready", LivenessPath: "/live"},
-		Logging: LoggingConf{Level: "info", Format: "json", Output: "stdout"},
+		Health:     HealthConf{HTTPPort: 8080, MetricsPort: 9090, ReadinessPath: "/ready", LivenessPath: "/live"},
+		Logging:    LoggingConf{Level: "info", Format: "json", Output: "stdout"},
 		IPC: IPCConf{
-			AdapterToCanonicalizer: "/tmp/raw-adapter-canonicalizer.sock",
+			AdapterToCanonicalizer:   "/tmp/raw-adapter-canonicalizer.sock",
 			CanonicalizerToPublisher: "/tmp/raw-canonicalizer-publisher.sock",
-			PublisherToStorage:      "/tmp/raw-publisher-storage.sock",
+			PublisherToStorage:       "/tmp/raw-publisher-storage.sock",
 		},
 		Processes: ProcessesConf{AdapterHealthPort: 8081, CanonicalizerHealthPort: 8082, PublisherHealthPort: 8083, StorageHealthPort: 8084},
 	}

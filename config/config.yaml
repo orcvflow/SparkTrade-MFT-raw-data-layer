@@ -33,6 +33,22 @@ adapters:
       backoff_seconds: [1, 2, 4, 8, 16, 30]
     request_timeout: "10s"
 
+  # MT5 adapter (ZeroMQ SUB from MQL5 EA) — ADDIM 4
+  # [ASSUMPTION A1]: Requires Wine 10.2 + MT5 terminal + mql5-zmq library.
+  # [ASSUMPTION A2]: Broker must support DOM/MarketBookGet for L2_DEPTH.
+  mt5:
+    enabled: false  # Default false (Wine + MT5 setup required)
+    endpoint: "tcp://localhost:5556"
+    symbols:
+      - "EURUSD"
+      - "GBPUSD"
+      - "XAUUSD"   # Gold
+      - "BTCUSD"   # Crypto CFD (if broker offers)
+    reconnect:
+      max_attempts: 10
+      backoff_seconds: [1, 2, 4, 8, 16, 30]
+    heartbeat_interval: "30s"
+
 worker_pool:
   workers: 50  # Optimal for 4-core CPU (DataSea.cn benchmark)
   queue_size: 10000  # Burst traffic buffer

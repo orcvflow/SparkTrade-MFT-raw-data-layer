@@ -1,0 +1,20 @@
+{
+  "EURUSD": "EUR/USD",
+  "GBPUSD": "GBP/USD",
+  "USDJPY": "USD/JPY",
+  "AUDUSD": "AUD/USD",
+  "USDCAD": "USD/CAD",
+  "USDCHF": "USD/CHF",
+  "NZDUSD": "NZD/USD",
+  "EURGBP": "EUR/GBP",
+  "EURJPY": "EUR/JPY",
+  "GBPJPY": "GBP/JPY",
+  "AUDJPY": "AUD/JPY",
+  "XAUUSD": "XAU/USD",
+  "XAGUSD": "XAG/USD",
+  "BTCUSD": "BTC/USD",
+  "ETHUSD": "ETH/USD",
+  "US30": "DOW30",
+  "US500": "SP500",
+  "NAS100": "NASDAQ100"
+}

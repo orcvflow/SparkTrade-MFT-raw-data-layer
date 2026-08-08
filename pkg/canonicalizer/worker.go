@@ -102,6 +102,8 @@ func (c *Canonicalizer) Process(ctx context.Context, raw adapter.RawMessage) (pm
 		err = c.parseBinanceInto(raw, ev)
 	case "IB":
 		err = c.parseIBInto(raw, ev)
+	case "MT5":
+		err = c.parseMT5Into(raw, ev)
 	default:
 		fillUnknown(ev, raw, raw.Source, "UNKNOWN")
 		err = fmt.Errorf("unknown source: %s", raw.Source)
@@ -129,7 +131,7 @@ type CanonicalEvent struct {
 	ForexMetadata   *ForexMetadata
 	FuturesMetadata *FuturesMetadata
 	CryptoMetadata  *CryptoMetadata
-	EquityMetadata   *EquityMetadata
+	EquityMetadata  *EquityMetadata
 }
 
 // Reset zeros the event for reuse via allocator.Pool. It preserves the Levels
@@ -294,6 +296,7 @@ func (c *Canonicalizer) parseIB(raw adapter.RawMessage) (*CanonicalEvent, error)
 	_ = c.parseIBInto(raw, ev)
 	return ev, nil
 }
+
 
 // Helper functions for safe extraction (kept for backward compatibility with
 // tests that call them directly; parseBinanceInto no longer uses them since it
