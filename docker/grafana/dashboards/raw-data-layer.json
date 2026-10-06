@@ -1,0 +1,142 @@
+{
+  "title": "Raw Data Layer — Pipeline",
+  "uid": "rdl-pipeline",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": ["raw-data-layer", "market-data"],
+  "timezone": "browser",
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "15s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROM",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "label": "Prometheus"
+      },
+      {
+        "name": "source",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+        "query": "label_values(raw_data_messages_processed_total, source)",
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" },
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Throughput (processed msg/s)",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (source) (rate(raw_data_messages_processed_total{source=~\"$source\"}[1m]))", "legendFormat": "{{source}}" }
+      ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Messages received (msg/s)",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (source) (rate(raw_data_messages_received_total{source=~\"$source\"}[1m]))", "legendFormat": "{{source}}" }
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Adapter latency p50 (µs)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le, source) (rate(raw_data_adapter_latency_microseconds_bucket{source=~\"$source\"}[5m])))", "legendFormat": "p50 {{source}}" }
+      ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Adapter latency p95 (µs)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, source) (rate(raw_data_adapter_latency_microseconds_bucket{source=~\"$source\"}[5m])))", "legendFormat": "p95 {{source}}" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Adapter latency p99 (µs)",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.99, sum by (le, source) (rate(raw_data_adapter_latency_microseconds_bucket{source=~\"$source\"}[5m])))", "legendFormat": "p99 {{source}}" }
+      ]
+    },
+    {
+      "id": 6, "type": "stat", "title": "Queue depth",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "raw_data_queue_depth", "legendFormat": "queue" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Backpressure events (1/s)",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "rate(raw_data_backpressure_total[5m])", "legendFormat": "backpressure" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "WAL writes (1/s)",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "rate(raw_data_wal_writes_total[5m])", "legendFormat": "wal" }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "DolphinDB writes (1/s)",
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "rate(raw_data_dolphindb_writes_total[5m])", "legendFormat": "ddb" }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "DolphinDB write errors (1/s)",
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "rate(raw_data_dolphindb_write_errors_total[5m])", "legendFormat": "ddb-errors" }
+      ]
+    },
+    {
+      "id": 11, "type": "stat", "title": "GC pause max (s)",
+      "gridPos": { "x": 0, "y": 40, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "go_gc_duration_seconds{quantile=\"1.0\"}", "legendFormat": "{{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 12, "type": "stat", "title": "Heap alloc (MB)",
+      "gridPos": { "x": 8, "y": 40, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "go_memstats_alloc_bytes / 1024 / 1024", "legendFormat": "{{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] }
+    },
+    {
+      "id": 13, "type": "stat", "title": "Goroutines",
+      "gridPos": { "x": 16, "y": 40, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "$DS_PROM" },
+      "targets": [
+        { "refId": "A", "expr": "go_goroutines", "legendFormat": "{{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    }
+  ]
+}

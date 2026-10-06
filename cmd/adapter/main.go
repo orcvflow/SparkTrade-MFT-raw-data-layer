@@ -87,6 +87,21 @@ func main() {
 			cfg.Adapters.IB.Host, cfg.Adapters.IB.Port, cfg.Adapters.IB.ClientID,
 			cfg.Adapters.IB.Symbols, adapterCfg))
 	}
+	// MT5 adapter (ZeroMQ SUB from MQL5 EA)
+	// [ASSUMPTION A3]: cfg.Adapters.MT5 may be nil if config/config.yaml has no mt5 block yet.
+	// Graceful degradation: if nil or disabled, skip without error (log.Info already covers this).
+	if cfg.Adapters.MT5 != nil && cfg.Adapters.MT5.Enabled {
+		mt5Cfg := adapter.AdapterConfig{
+			Enabled:           true,
+			ReconnectAttempts: 10, // CLAUDE.md: exponential backoff
+			BackoffSeconds:    []int{1, 2, 4, 8, 16, 30},
+			Timeout:           10 * time.Second,
+		}
+		adapters = append(adapters, adapter.NewMT5ZMQAdapter(
+			cfg.Adapters.MT5.Endpoint,
+			mt5Cfg,
+		))
+	}
 
 	// fanIn: drain rawCh → EncodeRaw → client.Send. Exits on ctx cancel after a
 	// non-blocking drain (never closes rawCh, so an in-flight adapter send cannot

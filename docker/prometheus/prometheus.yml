@@ -1,0 +1,42 @@
+# Prometheus Configuration — ADDIM 6
+# Scrapes /metrics from raw-data-layer process on host machine
+
+global:
+  scrape_interval: 15s      # Scrape targets every 15 seconds
+  evaluation_interval: 15s  # Evaluate rules every 15 seconds
+  external_labels:
+    monitor: 'raw-data-layer'
+
+# Scrape configs
+scrape_configs:
+  # Raw Data Layer — monolith (single-process fallback)
+  - job_name: 'raw-data-layer-monolith'
+    static_configs:
+      - targets: ['host.docker.internal:8080']  # C4 FIX: host-gateway mapped
+    metrics_path: '/metrics'
+    scrape_interval: 5s  # Higher frequency for real-time monitoring
+
+  # Raw Data Layer — multi-process split (Addım C topology)
+  - job_name: 'raw-data-layer-adapter'
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'raw-data-layer-canonicalizer'
+    static_configs:
+      - targets: ['host.docker.internal:8082']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'raw-data-layer-publisher'
+    static_configs:
+      - targets: ['host.docker.internal:8083']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'raw-data-layer-storage'
+    static_configs:
+      - targets: ['host.docker.internal:8084']
+    metrics_path: '/metrics'
+    scrape_interval: 5s

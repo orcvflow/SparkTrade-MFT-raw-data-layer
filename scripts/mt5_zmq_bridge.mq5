@@ -10,10 +10,10 @@
 
 // DEPENDENCIES (must be in MQL5/Include/):
 // 1. Zmq/Zmq.mqh — https://github.com/dingmaotu/mql-zmq
-// 2. JSON.mqh — MQL5 JSON library (built-in since build 2830+)
+// NOTE: JSON library NOT needed — we build JSON strings manually (see PublishL1Tick/PublishL2Depth)
 
 #include <Zmq/Zmq.mqh>
-#include <JAson.mqh>  // or <Json.mqh> depending on MQL5 version
+// #include <JAson.mqh>  // REMOVED — using manual JSON string construction
 
 //--- Input parameters
 input string   SymbolList = "EURUSD,GBPUSD,XAUUSD";  // Comma-separated symbols

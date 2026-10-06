@@ -1,0 +1,1 @@
+ Sync WAL spec hədəflərini ötmür (~20 msg/s, fsync-bound). Production-a keçməzdən əvvəl default batched-ə çevrilməlidir (Addım F)

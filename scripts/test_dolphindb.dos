@@ -1,0 +1,32 @@
+// Simple DolphinDB test script
+login("admin", "123456")
+print("✅ Login successful")
+
+// Test simple expression
+result = 1 + 1
+print("1 + 1 = " + string(result))
+
+// Check if database exists
+if(existsDatabase("dfs://raw_data")) {
+    print("✅ Database dfs://raw_data EXISTS")
+    db = database("dfs://raw_data")
+    
+    // Check tables
+    if(existsTable("dfs://raw_data", "raw_events")) {
+        print("✅ Table raw_events EXISTS")
+        count_raw = exec count(*) from loadTable("dfs://raw_data", "raw_events")
+        print("   Row count: " + string(count_raw))
+    } else {
+        print("❌ Table raw_events NOT FOUND")
+    }
+    
+    if(existsTable("dfs://raw_data", "canonical_events")) {
+        print("✅ Table canonical_events EXISTS")
+        count_canonical = exec count(*) from loadTable("dfs://raw_data", "canonical_events")
+        print("   Row count: " + string(count_canonical))
+    } else {
+        print("❌ Table canonical_events NOT FOUND")
+    }
+} else {
+    print("❌ Database dfs://raw_data NOT FOUND - schema needs to be applied")
+}
